@@ -1,0 +1,20 @@
+[package]
+name = "Particule_Simulation_4D"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+gpui-kit = "0.7.0"
+
+# Speed up the gpui stack at runtime in debug builds (no effect on compile time).
+# https://gpui-kit.com/versions/main/docs/installation/
+[profile.dev.package]
+gpui-pre = { opt-level = 3 }
+gpui-component = { opt-level = 3 }
+gpui-kit = { opt-level = 3 }
+gpui-kit-assets = { opt-level = 3 }
+gpui-pre-macros = { opt-level = 3 }
+gpui-pre-platform = { opt-level = 3 }
+rustybuzz = { opt-level = 3 }
+taffy = { opt-level = 3 }
+ttf-parser = { opt-level = 3 }
