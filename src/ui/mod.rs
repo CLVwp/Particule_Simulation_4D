@@ -7,7 +7,7 @@ use std::time::Instant;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::*;
 
-use crate::engine::{BODY_RADIUS, World};
+use particule_simulation_4d::engine::{BODY_RADIUS, World, thread_count};
 
 const FIXED_DT: f32 = 1.0 / 60.0;
 const SPAWN_ORIGIN: [f32; 3] = [0.0, 4.0, 0.0];
@@ -19,6 +19,9 @@ const AXIS_LEN: f32 = 2.0;
 const BG: u32 = 0x0b0e14;
 const FG: Hsla = hsla(0.58, 0.15, 0.9, 1.0);
 const FAINT: Hsla = hsla(0.58, 0.15, 0.85, 0.9);
+
+/// A projected line segment: two screen points and a color.
+type ProjectedLine = ((f32, f32, f32, f32), (f32, f32, f32, f32), Hsla);
 
 #[derive(Clone, Copy, PartialEq)]
 enum Page {
@@ -231,9 +234,12 @@ impl SimView {
             .justify_center()
             .gap_4()
             .track_focus(&self.focus)
-            .on_mouse_down(MouseButton::Left, cx.listener(|this, _: &MouseDownEvent, window, cx| {
-                window.focus(&this.focus, cx);
-            }))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _: &MouseDownEvent, window, cx| {
+                    window.focus(&this.focus, cx);
+                }),
+            )
             .on_key_down(cx.listener(|this, ev: &KeyDownEvent, _w, _cx| {
                 this.handle_key_down(ev);
             }))
@@ -277,20 +283,13 @@ impl SimView {
                     .flex()
                     .items_center()
                     .gap_6()
-                    .child(
-                        div()
-                            .w(px(110.0))
-                            .text_color(FAINT)
-                            .child(action.label()),
-                    )
-                    .child(
-                        Button::new(("bind", action as usize))
-                            .label(key)
-                            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                                this.rebinding = Some(action);
-                                window.focus(&this.focus, cx);
-                            })),
-                    ),
+                    .child(div().w(px(110.0)).text_color(FAINT).child(action.label()))
+                    .child(Button::new(("bind", action as usize)).label(key).on_click(
+                        cx.listener(move |this, _: &ClickEvent, window, cx| {
+                            this.rebinding = Some(action);
+                            window.focus(&this.focus, cx);
+                        }),
+                    )),
             );
         }
 
@@ -301,9 +300,12 @@ impl SimView {
             .items_center()
             .justify_center()
             .track_focus(&self.focus)
-            .on_mouse_down(MouseButton::Left, cx.listener(|this, _: &MouseDownEvent, window, cx| {
-                window.focus(&this.focus, cx);
-            }))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _: &MouseDownEvent, window, cx| {
+                    window.focus(&this.focus, cx);
+                }),
+            )
             .on_key_down(cx.listener(|this, ev: &KeyDownEvent, _w, _cx| {
                 this.handle_key_down(ev);
             }))
@@ -326,14 +328,12 @@ impl SimView {
                             .child("Pick an action. Then press the new key. Escape cancels."),
                     )
                     .child(rows)
-                    .child(
-                        Button::new("back")
-                            .label("Back")
-                            .on_click(cx.listener(|this, _: &ClickEvent, _, _| {
-                                this.page = Page::Menu;
-                                this.rebinding = None;
-                            })),
-                    ),
+                    .child(Button::new("back").label("Back").on_click(cx.listener(
+                        |this, _: &ClickEvent, _, _| {
+                            this.page = Page::Menu;
+                            this.rebinding = None;
+                        },
+                    ))),
             )
     }
 
@@ -365,7 +365,7 @@ impl SimView {
             .iter()
             .map(|b| self.project(b.pos, w, h))
             .collect();
-        points.sort_by(|a, b| b.3.total_cmp(&a.3)); // painter's algorithm: far first
+        points.sort_unstable_by(|a, b| b.3.total_cmp(&a.3)); // painter's algorithm: far first
 
         // Floor grid.
         let span = (GRID_HALF * GRID_STEP) as f32;
@@ -382,24 +382,11 @@ impl SimView {
 
         // Orthonormal frame: one colored arm per axis, plus a text label at each tip.
         const AXES: [([f32; 3], Hsla, &str); 3] = [
-            (
-                [AXIS_LEN, 0.0, 0.0],
-                hsla(0.0, 0.8, 0.55, 1.0),
-                "X",
-            ),
-            (
-                [0.0, AXIS_LEN, 0.0],
-                hsla(0.33, 0.8, 0.5, 1.0),
-                "Y",
-            ),
-            (
-                [0.0, 0.0, AXIS_LEN],
-                hsla(0.58, 0.8, 0.6, 1.0),
-                "Z",
-            ),
+            ([AXIS_LEN, 0.0, 0.0], hsla(0.0, 0.8, 0.55, 1.0), "X"),
+            ([0.0, AXIS_LEN, 0.0], hsla(0.33, 0.8, 0.5, 1.0), "Y"),
+            ([0.0, 0.0, AXIS_LEN], hsla(0.58, 0.8, 0.6, 1.0), "Z"),
         ];
-        let mut axis_lines: Vec<((f32, f32, f32, f32), (f32, f32, f32, f32), Hsla)> =
-            Vec::with_capacity(3);
+        let mut axis_lines: Vec<ProjectedLine> = Vec::with_capacity(3);
         let mut axis_labels: Vec<(f32, f32, Hsla, &'static str)> = Vec::with_capacity(3);
         for (tip, color, label) in AXES {
             let a = self.project([0.0, 0.0, 0.0], w, h);
@@ -429,6 +416,7 @@ impl SimView {
             .text_size(px(12.0))
             .text_color(FAINT)
             .child(format!("Bodies: {}", self.world.bodies.len()))
+            .child(format!("Threads: {}", thread_count()))
             .child(format!("FPS: {:.0}", self.fps))
             .child(format!(
                 "Camera: dist {:.1}  yaw {:.2}  pitch {:.2}",
@@ -439,14 +427,12 @@ impl SimView {
             ))
             .child("Drag: orbit. Shift+drag or middle-drag: pan. Wheel: zoom.")
             .child("Movement follows the camera.")
-            .child(
-                Button::new("menu")
-                    .label("Menu")
-                    .on_click(cx.listener(|this, _: &ClickEvent, _, _| {
-                        this.page = Page::Menu;
-                        this.drag = None;
-                    })),
-            );
+            .child(Button::new("menu").label("Menu").on_click(cx.listener(
+                |this, _: &ClickEvent, _, _| {
+                    this.page = Page::Menu;
+                    this.drag = None;
+                },
+            )));
 
         let toolbar = div()
             .absolute()
@@ -454,20 +440,16 @@ impl SimView {
             .left_1_2()
             .flex()
             .gap_2()
-            .child(
-                Button::new("add-100")
-                    .label("+100")
-                    .on_click(cx.listener(|this, _: &ClickEvent, _, _| {
-                        this.world.spawn_wave(100, SPAWN_ORIGIN, SPAWN_SPEED);
-                    })),
-            )
-            .child(
-                Button::new("add-1000")
-                    .label("+1000")
-                    .on_click(cx.listener(|this, _: &ClickEvent, _, _| {
-                        this.world.spawn_wave(1000, SPAWN_ORIGIN, SPAWN_SPEED);
-                    })),
-            )
+            .child(Button::new("add-100").label("+100").on_click(cx.listener(
+                |this, _: &ClickEvent, _, _| {
+                    this.world.spawn_wave(100, SPAWN_ORIGIN, SPAWN_SPEED);
+                },
+            )))
+            .child(Button::new("add-1000").label("+1000").on_click(cx.listener(
+                |this, _: &ClickEvent, _, _| {
+                    this.world.spawn_wave(1000, SPAWN_ORIGIN, SPAWN_SPEED);
+                },
+            )))
             .child(Button::new("clear").label("Clear").on_click(cx.listener(
                 |this, _: &ClickEvent, _, _| {
                     this.world.clear();
@@ -480,26 +462,38 @@ impl SimView {
             .overflow_hidden()
             .bg(rgb(BG))
             .track_focus(&self.focus)
-            .on_mouse_down(MouseButton::Left, cx.listener(|this, ev: &MouseDownEvent, window, cx| {
-                this.drag = Some(if ev.modifiers.shift {
-                    Drag::Pan
-                } else {
-                    Drag::Orbit
-                });
-                this.last_mouse = Some(ev.position);
-                window.focus(&this.focus, cx);
-            }))
-            .on_mouse_down(MouseButton::Middle, cx.listener(|this, ev: &MouseDownEvent, window, cx| {
-                this.drag = Some(Drag::Pan);
-                this.last_mouse = Some(ev.position);
-                window.focus(&this.focus, cx);
-            }))
-            .on_mouse_up(MouseButton::Left, cx.listener(|this, _: &MouseUpEvent, _w, _cx| {
-                this.drag = None;
-            }))
-            .on_mouse_up(MouseButton::Middle, cx.listener(|this, _: &MouseUpEvent, _w, _cx| {
-                this.drag = None;
-            }))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, ev: &MouseDownEvent, window, cx| {
+                    this.drag = Some(if ev.modifiers.shift {
+                        Drag::Pan
+                    } else {
+                        Drag::Orbit
+                    });
+                    this.last_mouse = Some(ev.position);
+                    window.focus(&this.focus, cx);
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Middle,
+                cx.listener(|this, ev: &MouseDownEvent, window, cx| {
+                    this.drag = Some(Drag::Pan);
+                    this.last_mouse = Some(ev.position);
+                    window.focus(&this.focus, cx);
+                }),
+            )
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _: &MouseUpEvent, _w, _cx| {
+                    this.drag = None;
+                }),
+            )
+            .on_mouse_up(
+                MouseButton::Middle,
+                cx.listener(|this, _: &MouseUpEvent, _w, _cx| {
+                    this.drag = None;
+                }),
+            )
             .on_mouse_move(cx.listener(|this, ev: &MouseMoveEvent, _w, _cx| {
                 let Some(drag) = this.drag else { return };
                 let Some(last) = this.last_mouse else { return };
