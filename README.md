@@ -13,6 +13,7 @@ A remake of my C++ / Raylib project [Cpp-Raylib-Particule-Simulation](https://gi
 | Language | Rust 1.92+ (edition 2024) |
 | UI & rendering | [gpui-kit](https://gpui-kit.com) 0.7 (re-exports GPUI + component library) |
 | Build system | Cargo |
+| Norme | ASD-STE100 |
 
 ## Prerequisites
 
