@@ -2,14 +2,21 @@
 name = "Particule_Simulation_4D"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.95"
 
 [lib]
 name = "particule_simulation_4d"
 
 [dependencies]
-gpui-kit = "0.7.0"
 rayon = "1.12.0"
+winit = "0.30"
+wgpu = "30"
+egui = "0.36"
+egui-winit = { version = "0.36", default-features = false, features = ["clipboard"] }
+egui-wgpu = "0.36"
+bytemuck = { version = "1.25", features = ["derive"] }
+pollster = "0.4"
+env_logger = "0.11"
 
 [dev-dependencies]
 criterion = "0.8.2"
@@ -36,15 +43,7 @@ inherits = "release"
 debug = true
 strip = false
 
-# Speed up the gpui stack at runtime in debug builds (no effect on compile time).
-# https://gpui-kit.com/versions/main/docs/installation/
+# Speed up the egui text raster in debug builds (no effect on compile time).
 [profile.dev.package]
-gpui-pre = { opt-level = 3 }
-gpui-component = { opt-level = 3 }
-gpui-kit = { opt-level = 3 }
-gpui-kit-assets = { opt-level = 3 }
-gpui-pre-macros = { opt-level = 3 }
-gpui-pre-platform = { opt-level = 3 }
-rustybuzz = { opt-level = 3 }
-taffy = { opt-level = 3 }
-ttf-parser = { opt-level = 3 }
+egui = { opt-level = 1 }
+epaint = { opt-level = 1 }
