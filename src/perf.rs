@@ -1,6 +1,8 @@
 //! Live memory stats through a counting global allocator.
 //!
 //! The overlay reads `allocated_bytes` and `peak_bytes` each frame.
+//! ponytail: the counting wrapper wraps any allocator; mimalloc is the swap
+//! when libmimalloc-sys compiles again (v3 sources fail on VS 18 BuildTools)
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -20,14 +22,15 @@ pub fn peak_bytes() -> usize {
     PEAK.load(Ordering::Relaxed)
 }
 
-/// Wraps [`System`] and tracks live allocation size.
-pub struct Counting;
+/// Wraps an allocator and tracks live allocation size.
+pub struct Counting<A>(pub A);
 
-unsafe impl GlobalAlloc for Counting {
+unsafe impl<A: GlobalAlloc> GlobalAlloc for Counting<A> {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        // SAFETY: the caller upholds the GlobalAlloc contract. System gets the
-        // same size and alignment, so the pointer stays valid for dealloc.
-        let ptr = unsafe { System.alloc(layout) };
+        // SAFETY: the caller upholds the GlobalAlloc contract. The inner
+        // allocator gets the same size and alignment, so the pointer stays
+        // valid for dealloc.
+        let ptr = unsafe { self.0.alloc(layout) };
         if !ptr.is_null() {
             let live = LIVE.fetch_add(layout.size(), Ordering::Relaxed) + layout.size();
             PEAK.fetch_max(live, Ordering::Relaxed);
@@ -36,14 +39,15 @@ unsafe impl GlobalAlloc for Counting {
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        // SAFETY: ptr came from System.alloc with this exact layout (see alloc).
-        unsafe { System.dealloc(ptr, layout) };
+        // SAFETY: ptr came from the inner allocator with this exact layout
+        // (see alloc).
+        unsafe { self.0.dealloc(ptr, layout) };
         LIVE.fetch_sub(layout.size(), Ordering::Relaxed);
     }
 }
 
 #[global_allocator]
-static GLOBAL_ALLOC: Counting = Counting;
+static GLOBAL_ALLOC: Counting<System> = Counting(System);
 
 #[cfg(test)]
 mod tests {

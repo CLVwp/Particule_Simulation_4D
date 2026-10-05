@@ -7,6 +7,7 @@ use std::time::Instant;
 
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::*;
+use rayon::prelude::*;
 
 use particule_simulation_4d::engine::fluid::Fluid;
 use particule_simulation_4d::engine::{BODY_RADIUS, Body, PAR_MIN, Shape, World, thread_count};
@@ -487,16 +488,22 @@ impl SimView {
         // Fluid: (x, y, radius_px, density, depth) per lit cell.
         let (points, fluid_quads): (Vec<ProjectedBody>, Vec<ProjectedCell>) =
             if self.mode == PhysicsMode::Newton {
-                let mut points: Vec<ProjectedBody> = self
-                    .world
-                    .bodies
-                    .iter()
-                    .map(|b| {
-                        let (x, y, focal, z) = self.project(b.pos, w, h);
-                        (x, y, (b.radius * focal / z).max(1.5), z, b.shape)
-                    })
-                    .collect();
-                points.sort_unstable_by(|a, b| b.3.total_cmp(&a.3)); // painter's algorithm: far first
+                let project = |b: &Body| {
+                    let (x, y, focal, z) = self.project(b.pos, w, h);
+                    (x, y, (b.radius * focal / z).max(1.5), z, b.shape)
+                };
+                let bodies = &self.world.bodies;
+                let mut points: Vec<ProjectedBody> = if bodies.len() >= PAR_MIN {
+                    bodies.par_iter().map(project).collect()
+                } else {
+                    bodies.iter().map(project).collect()
+                };
+                // painter's algorithm: far first
+                if points.len() >= PAR_MIN {
+                    points.par_sort_unstable_by(|a, b| b.3.total_cmp(&a.3));
+                } else {
+                    points.sort_unstable_by(|a, b| b.3.total_cmp(&a.3));
+                }
                 (points, Vec::new())
             } else {
                 let n = self.fluid.n;

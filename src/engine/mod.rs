@@ -6,7 +6,6 @@
 use std::time::Instant;
 
 use rayon::prelude::*;
-use rustc_hash::FxHashMap;
 
 pub mod fluid;
 
@@ -134,17 +133,21 @@ pub struct World {
     pub settings: SimSettings,
     /// Grid cell edge. Grows to fit the biggest spawned radius.
     cell_size: f32,
-    /// Candidate contacts found in the grid this step.
+    /// Candidate contacts found this step.
     contacts: Vec<Contact>,
     /// Per-contact solve results for the current round.
     deltas: Vec<ContactDelta>,
-    /// For each body: tags of the contacts that touch it. Bit `J_SIDE` marks the `j` side.
-    body_contacts: Vec<Vec<u32>>,
+    /// Cell key + body index, sorted by key. Replaces the hash grid.
+    cell_sort: Vec<(u64, u32)>,
+    /// Per-body contact index as flat arrays: offsets into `bc_items`.
+    bc_start: Vec<u32>,
+    /// Fill cursor for `bc_items`, kept across steps to avoid reallocation.
+    bc_cursor: Vec<u32>,
+    /// Contact tags in body order. Bit `J_SIDE` marks the `j` side.
+    bc_items: Vec<u32>,
     /// Wall time of the last step per phase, in ms:
     /// integrate, grid, contacts, resolve, floor. Read by the debug overlay.
     pub phase_ms: [f32; 5],
-    /// Spatial hash grid. Cleared each step; the cell buffers stay allocated.
-    grid: FxHashMap<[i32; 3], Vec<u32>>,
 }
 
 impl Default for World {
@@ -155,9 +158,11 @@ impl Default for World {
             cell_size: 2.0 * BODY_RADIUS,
             contacts: Vec::new(),
             deltas: Vec::new(),
-            body_contacts: Vec::new(),
+            cell_sort: Vec::new(),
+            bc_start: Vec::new(),
+            bc_cursor: Vec::new(),
+            bc_items: Vec::new(),
             phase_ms: [0.0; 5],
-            grid: FxHashMap::default(),
         }
     }
 }
@@ -209,7 +214,7 @@ impl World {
         self.integrate(dt);
         self.phase_ms[0] = ms_since(t);
         let t = Instant::now();
-        self.build_grid();
+        self.sort_cells();
         self.phase_ms[1] = ms_since(t);
         let t = Instant::now();
         self.build_contacts();
@@ -233,54 +238,72 @@ impl World {
         });
     }
 
-    /// Fills the spatial hash grid. One cell holds one body diameter.
-    /// ponytail: O(n) grid with 27-cell neighborhoods; a BVH only pays off past ~50k bodies
-    fn build_grid(&mut self) {
+    /// Packs every body's cell into a key and sorts the pairs. One cell holds
+    /// one body diameter. Neighbor cells become binary searches, so there is
+    /// no map to clear and no allocation.
+    fn sort_cells(&mut self) {
         let World {
-            grid,
+            cell_sort,
             bodies,
             cell_size,
             ..
         } = self;
         let cs = *cell_size;
-        for cell in grid.values_mut() {
-            cell.clear();
+        let bodies = &*bodies;
+        cell_sort.clear();
+        cell_sort.resize(bodies.len(), (0, 0));
+        let fill = |(i, slot): (usize, &mut (u64, u32))| {
+            *slot = (cell_key(bodies[i].pos, cs), i as u32);
+        };
+        if cell_sort.len() < PAR_MIN {
+            cell_sort.iter_mut().enumerate().for_each(fill);
+            cell_sort.sort_unstable();
+        } else {
+            cell_sort.par_iter_mut().enumerate().for_each(fill);
+            cell_sort.par_sort_unstable();
         }
-        for (i, b) in bodies.iter().enumerate() {
-            grid.entry(cell_of(b.pos, cs)).or_default().push(i as u32);
-        }
-        // Drops cells no body occupies any more. Without this, the map keeps
-        // every cell ever visited and the clear pass grows without bound.
-        grid.retain(|_, cell| !cell.is_empty());
     }
 
-    /// Finds candidate pairs: body `i` scans its 27 neighbor cells and keeps `j > i`.
-    /// Runs on the pool; the grid and the bodies are read-only here.
+    /// Finds candidate pairs: body `i` binary-searches its 27 neighbor cells
+    /// in the sorted array and keeps `j > i`. Runs on the pool; everything it
+    /// touches is read-only.
+    ///
+    /// The per-body index fill stays sequential on purpose: each body's list
+    /// must keep contact order, or the Jacobi sum stops being deterministic.
+    /// ponytail: a parallel fill needs per-contact ranks; more passes than it saves below ~100k contacts
     fn build_contacts(&mut self) {
         let World {
-            grid,
+            cell_sort,
             bodies,
             contacts,
-            body_contacts,
+            bc_start,
+            bc_cursor,
+            bc_items,
             cell_size,
             ..
         } = self;
-        let grid = &*grid;
+        let cell_sort = &*cell_sort;
         let bodies = &*bodies;
         let cs = *cell_size;
-        let scan = |i: u32| {
-            let c = cell_of(bodies[i as usize].pos, cs);
+        let scan = move |i: u32| {
+            let [cx, cy, cz] = cell_of(bodies[i as usize].pos, cs);
             let mi = bodies[i as usize].mass();
-            (-1..=1i32)
+            (-1i64..=1)
                 .flat_map(move |dx| {
-                    (-1..=1i32).flat_map(move |dy| {
-                        (-1..=1i32)
-                            .filter_map(move |dz| grid.get(&[c[0] + dx, c[1] + dy, c[2] + dz]))
+                    (-1i64..=1).flat_map(move |dy| {
+                        (-1i64..=1).map(move |dz| {
+                            pack_cell(cx as i64 + dx, cy as i64 + dy, cz as i64 + dz)
+                        })
                     })
                 })
-                .flat_map(|cell| cell.iter().copied())
-                .filter(move |&j| j > i)
-                .map(move |j| Contact {
+                .map(move |key| {
+                    let lo = cell_sort.partition_point(|&(k, _)| k < key);
+                    let hi = cell_sort.partition_point(|&(k, _)| k <= key);
+                    &cell_sort[lo..hi]
+                })
+                .flat_map(|run| run.iter())
+                .filter(move |&&(_, j)| j > i)
+                .map(move |&(_, j)| Contact {
                     i,
                     j,
                     mi,
@@ -296,11 +319,27 @@ impl World {
                 .collect()
         };
 
-        body_contacts.clear();
-        body_contacts.resize(bodies.len(), Vec::new());
+        // Per-body contact index as CSR: counts, prefix sum, then the fill.
+        let n = bodies.len();
+        bc_start.clear();
+        bc_start.resize(n + 1, 0);
+        for c in contacts.iter() {
+            bc_start[c.i as usize + 1] += 1;
+            bc_start[c.j as usize + 1] += 1;
+        }
+        for k in 1..=n {
+            bc_start[k] += bc_start[k - 1];
+        }
+        bc_items.clear();
+        bc_items.resize(contacts.len() * 2, 0);
+        bc_cursor.clear();
+        bc_cursor.extend_from_slice(&bc_start[..n]);
         for (ci, c) in contacts.iter().enumerate() {
-            body_contacts[c.i as usize].push(ci as u32);
-            body_contacts[c.j as usize].push(ci as u32 | J_SIDE);
+            let ci = ci as u32;
+            bc_items[bc_cursor[c.i as usize] as usize] = ci;
+            bc_cursor[c.i as usize] += 1;
+            bc_items[bc_cursor[c.j as usize] as usize] = ci | J_SIDE;
+            bc_cursor[c.j as usize] += 1;
         }
     }
 
@@ -313,7 +352,8 @@ impl World {
             bodies,
             contacts,
             deltas,
-            body_contacts,
+            bc_start,
+            bc_items,
             settings,
             ..
         } = self;
@@ -335,7 +375,9 @@ impl World {
 
             let apply = |(b, body): (usize, &mut Body)| {
                 let (mut dpos, mut dvel) = ([0.0f32; 3], [0.0f32; 3]);
-                for &tag in &body_contacts[b] {
+                let from = bc_start[b] as usize;
+                let to = bc_start[b + 1] as usize;
+                for &tag in &bc_items[from..to] {
                     let idx = (tag & !J_SIDE) as usize;
                     let (dp, dv) = contact_share(&deltas[idx], &contacts[idx], tag & J_SIDE != 0);
                     for k in 0..3 {
@@ -444,6 +486,29 @@ fn cell_of(p: [f32; 3], cell_size: f32) -> [i32; 3] {
         (p[1] / cell_size).floor() as i32,
         (p[2] / cell_size).floor() as i32,
     ]
+}
+
+/// One axis of a packed cell key: 21 bits, offset to be unsigned.
+const KEY_OFF: i64 = 1 << 20;
+/// Values per key field. Cells past the edge clamp onto it.
+const KEY_SPAN: i64 = 1 << 21;
+
+/// Clamps one axis into its key field.
+fn key_part(v: i64) -> u64 {
+    (v + KEY_OFF).clamp(0, KEY_SPAN - 1) as u64
+}
+
+/// Packs a cell into a sortable u64: 21 bits per axis, x highest.
+/// ponytail: axes clamp at +/-1M cells (~ +/-200 km of scene); past that far
+/// bodies share edge cells and the distance test rejects the fake pairs
+fn cell_key(p: [f32; 3], cell_size: f32) -> u64 {
+    let [x, y, z] = cell_of(p, cell_size);
+    key_part(x as i64) << 42 | key_part(y as i64) << 21 | key_part(z as i64)
+}
+
+/// Packs already-computed cell coordinates.
+fn pack_cell(x: i64, y: i64, z: i64) -> u64 {
+    key_part(x) << 42 | key_part(y) << 21 | key_part(z)
 }
 
 #[cfg(test)]
@@ -571,16 +636,26 @@ mod tests {
     }
 
     #[test]
-    fn grid_drops_cells_bodies_left() {
+    fn cells_are_sorted_and_match_bodies() {
         let mut w = World::new();
-        w.spawn_wave(2, [0.0, 3.0, 0.0], 0.0);
-        w.bodies[0].pos = [-50.0, 3.0, -50.0];
-        w.bodies[1].pos = [50.0, 3.0, 50.0];
-        for _ in 0..10 {
-            w.step(1.0 / 60.0);
+        w.spawn_wave(200, [0.0, 5.0, 0.0], 4.0);
+        w.step(1.0 / 60.0);
+        // step() moves bodies after the sort (contacts push them), so re-sync
+        // the array with the final positions before checking.
+        w.sort_cells();
+        assert_eq!(w.cell_sort.len(), w.bodies.len(), "lost bodies in the sort");
+        assert!(
+            w.cell_sort.windows(2).all(|pair| pair[0] <= pair[1]),
+            "cell keys not sorted"
+        );
+        // Every body finds its own (key, index) pair in the sorted array.
+        let cs = 2.0 * BODY_RADIUS;
+        for (i, b) in w.bodies.iter().enumerate() {
+            let entry = (cell_key(b.pos, cs), i as u32);
+            assert!(
+                w.cell_sort.binary_search(&entry).is_ok(),
+                "body {i} missing from the sorted cells"
+            );
         }
-        // Two live bodies, so the map may hold a handful of cells, no more.
-        // Before the retain fix this read in the thousands after spreading.
-        assert!(w.grid.len() <= 4, "grid kept {} dead cells", w.grid.len());
     }
 }
