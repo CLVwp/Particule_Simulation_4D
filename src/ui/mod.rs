@@ -23,6 +23,7 @@ use particule_simulation_4d::engine::{BODY_RADIUS, Shape, World};
 
 use crate::ui::input::{Drag, KeyLayout, MoveAction, ORBIT_SENSITIVITY};
 use crate::ui::paint::{axis_label_divs, paint_scene};
+use crate::ui::scene::TileMerge;
 use crate::ui::theme::{BG, SMOOTH_KEEP, SMOOTH_NEW};
 
 const FIXED_DT: f32 = 1.0 / 60.0;
@@ -76,6 +77,10 @@ pub struct SimView {
     pub(crate) fps: f32,
     pub(crate) step_ms: f32,
     pub(crate) scene_ms: f32,
+    // Scratch for the tile merge. `tile_bins` holds one sum set per tile.
+    // `tile_touched` lists used tiles. Each build resets only its used tiles.
+    pub(crate) tile_bins: Vec<TileMerge>,
+    pub(crate) tile_touched: Vec<u32>,
     last_frame: Option<Instant>,
 }
 
@@ -107,6 +112,8 @@ impl SimView {
             fps: 60.0,
             step_ms: 0.0,
             scene_ms: 0.0,
+            tile_bins: Vec::new(),
+            tile_touched: Vec::new(),
             last_frame: None,
         }
     }
