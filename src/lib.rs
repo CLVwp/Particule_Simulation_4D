@@ -2,10 +2,8 @@
 //!
 //! [`engine`] holds the physics. The `main` binary wires it to the GPUI UI.
 //!
-//! Lints: correctness bugs fail the build; perf issues warn.
-
-#![deny(clippy::correctness)]
-#![warn(clippy::perf)]
+//! Lints: correctness bugs fail the build; perf issues warn. Set in Cargo.toml
+//! so every target, including the binary and the bench, gets the same policy.
 
 pub mod engine;
 pub mod perf;

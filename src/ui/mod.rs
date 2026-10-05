@@ -22,6 +22,16 @@ const AXIS_LEN: f32 = 2.0;
 /// The fluid plane spans `FLUID_SPAN` world units and starts at `FLUID_LEFT`.
 const FLUID_LEFT: f32 = -8.0;
 const FLUID_SPAN: f32 = 16.0;
+/// Cells at or below this density do not draw.
+const DENSITY_CUTOFF: f32 = 0.02;
+/// One pixel of drag turns the camera by this many radians.
+const ORBIT_SENSITIVITY: f32 = 0.01;
+/// Slide speed as a fraction of the camera distance.
+const MOVE_SPEED_FRACTION: f32 = 0.03;
+/// Each frame-stat average keeps this share of its old value.
+const SMOOTH_KEEP: f32 = 0.9;
+/// Each frame-stat average takes this share of its new value.
+const SMOOTH_NEW: f32 = 0.1;
 
 const BG: u32 = 0x0b0e14;
 const FG: Hsla = hsla(0.58, 0.15, 0.9, 1.0);
@@ -30,11 +40,23 @@ const FAINT: Hsla = hsla(0.58, 0.15, 0.85, 0.9);
 /// A projected line segment: two screen points and a color.
 type ProjectedLine = ((f32, f32, f32, f32), (f32, f32, f32, f32), Hsla);
 
-/// A projected body: screen x, screen y, radius in px, depth, shape.
-type ProjectedBody = (f32, f32, f32, f32, Shape);
+/// A body drawn as one screen quad at `x`, `y`.
+struct ProjectedBody {
+    x: f32,
+    y: f32,
+    radius_px: f32,
+    depth: f32,
+    shape: Shape,
+}
 
-/// A projected fluid cell: screen x, screen y, radius in px, depth, density.
-type ProjectedCell = (f32, f32, f32, f32, f32);
+/// One lit fluid cell drawn as one screen quad at `x`, `y`.
+struct ProjectedCell {
+    x: f32,
+    y: f32,
+    radius_px: f32,
+    density: f32,
+    depth: f32,
+}
 
 #[derive(Clone, Copy, PartialEq)]
 enum Page {
@@ -192,7 +214,7 @@ impl SimView {
     }
 
     /// True while the key bound to `action` is held down.
-    fn held(&self, action: MoveAction) -> bool {
+    fn is_held(&self, action: MoveAction) -> bool {
         self.keys.contains(&self.bindings[action as usize])
     }
 
@@ -214,34 +236,34 @@ impl SimView {
 
     /// Applies the held keys: slides follow the camera, rise and sink use the world axis.
     fn apply_keys(&mut self) {
-        let speed = self.dist * 0.03;
+        let speed = self.dist * MOVE_SPEED_FRACTION;
         let fwd = self.forward();
         let right = self.right();
         let mut t = self.target;
-        if self.held(MoveAction::Forward) {
+        if self.is_held(MoveAction::Forward) {
             for a in 0..3 {
                 t[a] += fwd[a] * speed;
             }
         }
-        if self.held(MoveAction::Back) {
+        if self.is_held(MoveAction::Back) {
             for a in 0..3 {
                 t[a] -= fwd[a] * speed;
             }
         }
-        if self.held(MoveAction::Right) {
+        if self.is_held(MoveAction::Right) {
             for a in 0..3 {
                 t[a] += right[a] * speed;
             }
         }
-        if self.held(MoveAction::Left) {
+        if self.is_held(MoveAction::Left) {
             for a in 0..3 {
                 t[a] -= right[a] * speed;
             }
         }
-        if self.held(MoveAction::Rise) {
+        if self.is_held(MoveAction::Rise) {
             t[1] += speed;
         }
-        if self.held(MoveAction::Sink) {
+        if self.is_held(MoveAction::Sink) {
             t[1] -= speed;
         }
         self.target = t;
@@ -462,7 +484,7 @@ impl SimView {
             if let Some(last) = this.last_frame {
                 let dt = (now - last).as_secs_f32();
                 if dt > 0.0 {
-                    this.fps = this.fps * 0.9 + (1.0 / dt) * 0.1;
+                    this.fps = this.fps * SMOOTH_KEEP + (1.0 / dt) * SMOOTH_NEW;
                 }
             }
             this.last_frame = Some(now);
@@ -474,7 +496,7 @@ impl SimView {
                 PhysicsMode::Fluid => this.fluid.step(FIXED_DT),
             }
             let ms = (t.elapsed().as_secs_f32() * 1000.0).min(1000.0);
-            this.step_ms = this.step_ms * 0.9 + ms * 0.1;
+            this.step_ms = this.step_ms * SMOOTH_KEEP + ms * SMOOTH_NEW;
             cx.notify();
         });
 
@@ -488,56 +510,71 @@ impl SimView {
         // up as mirrored "ghost" shapes.
         const NEAR: f32 = 0.5;
         let scene = Instant::now();
-        // Newton: (x, y, radius_px, depth, shape) per body.
-        // Fluid: (x, y, radius_px, density, depth) per lit cell.
         let (points, fluid_quads): (Vec<ProjectedBody>, Vec<ProjectedCell>) =
             if self.mode == PhysicsMode::Newton {
                 let project = |b: &Body| {
-                    let (x, y, focal, z) = self.project(b.pos, w, h);
-                    (x, y, (b.radius * focal / z).max(1.5), z, b.shape)
+                    let (x, y, focal, depth) = self.project(b.pos, w, h);
+                    ProjectedBody {
+                        x,
+                        y,
+                        radius_px: (b.radius * focal / depth).max(1.5),
+                        depth,
+                        shape: b.shape,
+                    }
                 };
                 let bodies = &self.world.bodies;
                 let mut points: Vec<ProjectedBody> = if bodies.len() >= PAR_MIN {
                     bodies
                         .par_iter()
                         .map(project)
-                        .filter(|p| p.3 > NEAR)
+                        .filter(|p| p.depth > NEAR)
                         .collect()
                 } else {
-                    bodies.iter().map(project).filter(|p| p.3 > NEAR).collect()
+                    bodies
+                        .iter()
+                        .map(project)
+                        .filter(|p| p.depth > NEAR)
+                        .collect()
                 };
-                // painter's algorithm: far first
+                // Painter's algorithm: far bodies draw first.
                 if points.len() >= PAR_MIN {
-                    points.par_sort_unstable_by(|a, b| b.3.total_cmp(&a.3));
+                    points.par_sort_unstable_by(|a, b| b.depth.total_cmp(&a.depth));
                 } else {
-                    points.sort_unstable_by(|a, b| b.3.total_cmp(&a.3));
+                    points.sort_unstable_by(|a, b| b.depth.total_cmp(&a.depth));
                 }
                 (points, Vec::new())
             } else {
                 let n = self.fluid.n;
                 let cell = FLUID_SPAN / n as f32;
-                let mut quads: Vec<ProjectedCell> = Vec::new();
+                // The loop visits `n * n` cells, so each pushes at most one quad.
+                let mut quads: Vec<ProjectedCell> = Vec::with_capacity(n * n);
                 for j in 1..=n {
                     for i in 1..=n {
-                        let d = self.fluid.dens[i + (n + 2) * j];
-                        if d <= 0.02 {
+                        let density = self.fluid.dens[i + (n + 2) * j];
+                        if density <= DENSITY_CUTOFF {
                             continue;
                         }
                         let xw = FLUID_LEFT + (i as f32 - 0.5) * cell;
                         let yw = (j as f32 - 0.5) * cell;
-                        let (x, y, focal, z) = self.project([xw, yw, 0.0], w, h);
-                        if z <= NEAR {
+                        let (x, y, focal, depth) = self.project([xw, yw, 0.0], w, h);
+                        if depth <= NEAR {
                             continue;
                         }
-                        let rad = (cell * focal / z * 0.5).max(1.0);
-                        quads.push((x, y, rad, d, z));
+                        let radius_px = (cell * focal / depth * 0.5).max(1.0);
+                        quads.push(ProjectedCell {
+                            x,
+                            y,
+                            radius_px,
+                            density,
+                            depth,
+                        });
                     }
                 }
-                quads.sort_unstable_by(|a, b| b.4.total_cmp(&a.4));
+                quads.sort_unstable_by(|a, b| b.depth.total_cmp(&a.depth));
                 (Vec::new(), quads)
             };
         let ms = (scene.elapsed().as_secs_f32() * 1000.0).min(1000.0);
-        self.scene_ms = self.scene_ms * 0.9 + ms * 0.1;
+        self.scene_ms = self.scene_ms * SMOOTH_KEEP + ms * SMOOTH_NEW;
         let quads_drawn = points.len() + fluid_quads.len();
 
         // Floor grid. A segment with one end behind the camera warps too, so
@@ -680,8 +717,8 @@ impl SimView {
                 this.last_mouse = Some(ev.position);
                 match drag {
                     Drag::Orbit => {
-                        this.yaw += dx * 0.01;
-                        this.pitch = (this.pitch + dy * 0.01).clamp(-1.4, 1.4);
+                        this.yaw += dx * ORBIT_SENSITIVITY;
+                        this.pitch = (this.pitch + dy * ORBIT_SENSITIVITY).clamp(-1.4, 1.4);
                     }
                     Drag::Pan => {
                         let s = this.dist * 0.0015;
@@ -716,32 +753,32 @@ impl SimView {
                     for (a, b) in grid {
                         paint_line(window, a, b, hsla(0.55, 0.4, 0.5, 0.35), 0.7);
                     }
-                    for (x, y, rad, d, _z) in &fluid_quads {
-                        let alpha = (0.15 + 0.75 * d).clamp(0.15, 0.9);
-                        let light = (0.45 + 0.2 * d).clamp(0.4, 0.75);
+                    for q in &fluid_quads {
+                        let alpha = (0.15 + 0.75 * q.density).clamp(0.15, 0.9);
+                        let light = (0.45 + 0.2 * q.density).clamp(0.4, 0.75);
                         window.paint_quad(fill(
                             Bounds::new(
-                                point(px(x - rad), px(y - rad)),
-                                size(px(rad * 2.0), px(rad * 2.0)),
+                                point(px(q.x - q.radius_px), px(q.y - q.radius_px)),
+                                size(px(q.radius_px * 2.0), px(q.radius_px * 2.0)),
                             ),
                             hsla(0.55, 0.85, light, alpha),
                         ));
                     }
-                    for (x, y, rad, z, shape) in &points {
-                        let alpha = (1.5 - z / dist).clamp(0.25, 1.0);
-                        let color = match shape {
+                    for p in &points {
+                        let alpha = (1.5 - p.depth / dist).clamp(0.25, 1.0);
+                        let color = match p.shape {
                             Shape::Sphere => hsla(0.53, 0.9, 0.6, alpha),
                             Shape::Cube => hsla(0.08, 0.9, 0.6, alpha),
                         };
-                        let round = match shape {
-                            Shape::Sphere => px(*rad),
+                        let round = match p.shape {
+                            Shape::Sphere => px(p.radius_px),
                             Shape::Cube => px(0.0),
                         };
                         window.paint_quad(
                             fill(
                                 Bounds::new(
-                                    point(px(x - rad), px(y - rad)),
-                                    size(px(rad * 2.0), px(rad * 2.0)),
+                                    point(px(p.x - p.radius_px), px(p.y - p.radius_px)),
+                                    size(px(p.radius_px * 2.0), px(p.radius_px * 2.0)),
                                 ),
                                 color,
                             )

@@ -12,14 +12,17 @@ pub mod fluid;
 // ponytail: hand-rolled LCG instead of the `rand` crate; swap if we need real distributions
 struct Rng(u64);
 
+/// Multiplier of the Knuth MMIX linear congruential generator.
+const LCG_MULT: u64 = 6364136223846793005;
+/// Increment of the Knuth MMIX linear congruential generator.
+const LCG_INC: u64 = 1442695040888963407;
+
 impl Rng {
     /// Uniform in [-1, 1].
     fn next_f32(&mut self) -> f32 {
-        self.0 = self
-            .0
-            .wrapping_mul(6364136223846793005)
-            .wrapping_add(1442695040888963407);
-        ((self.0 >> 33) as f32 / u32::MAX as f32) * 2.0 - 1.0
+        self.0 = self.0.wrapping_mul(LCG_MULT).wrapping_add(LCG_INC);
+        // The top 32 bits fill a full u32, so the fraction spans [0, 1].
+        ((self.0 >> 32) as u32 as f32 / u32::MAX as f32) * 2.0 - 1.0
     }
 }
 
@@ -33,6 +36,8 @@ pub const FLOOR_RESTITUTION: f32 = 0.75;
 pub const GROUND_FRICTION: f32 = 0.9;
 /// Radius of every spawned body.
 pub const BODY_RADIUS: f32 = 0.1;
+/// Smallest radius `spawn` accepts. Thinner bodies divide by zero in the solver.
+pub const MIN_RADIUS: f32 = 0.05;
 
 const PAIR_RESTITUTION: f32 = 0.6;
 const SLOP: f32 = 0.001; // allowed penetration
@@ -72,11 +77,14 @@ impl Default for SimSettings {
 /// Visual shape of a body. Physics always uses a sphere of the same radius.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Shape {
+    /// Drawn as a sphere.
     Sphere,
+    /// Drawn as a box. Physics still uses the sphere.
     Cube,
 }
 
 /// Logical cores visible to this process.
+#[must_use]
 pub fn thread_count() -> usize {
     std::thread::available_parallelism()
         .map(usize::from)
@@ -86,9 +94,13 @@ pub fn thread_count() -> usize {
 /// One particle: a sphere with a position and a velocity.
 #[derive(Clone, Copy, Debug)]
 pub struct Body {
+    /// Position in world units, as x, y, z.
     pub pos: [f32; 3],
+    /// Velocity in units per second.
     pub vel: [f32; 3],
+    /// Sphere radius in world units.
     pub radius: f32,
+    /// Visual shape. Physics always uses the sphere.
     pub shape: Shape,
 }
 
@@ -125,9 +137,27 @@ impl ContactDelta {
     };
 }
 
+// Layout guards. These types fill the hot arrays, so their size must not drift.
+// Body holds 7 floats and a 1-byte tag. Alignment pads it to 32 bytes.
+const _: () = assert!(std::mem::size_of::<Body>() == 32);
+const _: () = assert!(std::mem::size_of::<Contact>() == 16);
+const _: () = assert!(std::mem::size_of::<ContactDelta>() == 20);
+
 /// Particle positions and velocities in x, y, z (time lives in `step(dt)`).
+///
+/// # Examples
+///
+/// ```
+/// use particule_simulation_4d::engine::World;
+///
+/// let mut world = World::new();
+/// world.spawn_wave(100, [0.0, 5.0, 0.0], 4.0);
+/// world.step(1.0 / 60.0);
+/// assert_eq!(world.bodies.len(), 100);
+/// ```
 #[derive(Debug)]
 pub struct World {
+    /// Every body in the world. Callers may edit them between steps.
     pub bodies: Vec<Body>,
     /// Laws of motion. Change them freely between steps.
     pub settings: SimSettings,
@@ -175,18 +205,22 @@ impl Default for World {
 }
 
 impl World {
+    /// Creates an empty world with default settings.
     pub fn new() -> Self {
         World::default()
     }
 
     /// Candidate contacts found in the last step.
+    #[must_use]
     pub fn contact_count(&self) -> usize {
         self.contacts.len()
     }
 
     /// Spawns `n` bodies at `origin` with fountain-like velocities.
     pub fn spawn(&mut self, n: usize, origin: [f32; 3], speed: f32, shape: Shape, radius: f32) {
+        let radius = radius.max(MIN_RADIUS);
         self.cell_size = self.cell_size.max(2.0 * radius);
+        self.bodies.reserve(n);
         let mut rng = Rng(0x2545F4914F6CDD1D ^ n as u64);
         for _ in 0..n {
             self.bodies.push(Body {
@@ -211,11 +245,13 @@ impl World {
         self.spawn(n, origin, speed, Shape::Sphere, BODY_RADIUS);
     }
 
+    /// Removes every body and resets the grid to its base size.
     pub fn clear(&mut self) {
         self.bodies.clear();
         self.cell_size = 2.0 * BODY_RADIUS;
     }
 
+    /// Advances the world by `dt` seconds.
     pub fn step(&mut self, dt: f32) {
         let t = Instant::now();
         self.integrate(dt);
@@ -259,6 +295,8 @@ impl World {
         } = self;
         let cs = *cell_size;
         let bodies = &*bodies;
+        // Guards the `as u32` body-index casts below.
+        debug_assert!(bodies.len() <= u32::MAX as usize);
         cell_sort.clear();
         cell_sort.resize(bodies.len(), (0, 0));
         let fill = |(i, slot): (usize, &mut (u64, u32))| {
@@ -314,6 +352,8 @@ impl World {
         let cell_keys = &*cell_keys;
         let cell_start = &*cell_start;
         let bodies = &*bodies;
+        // Guards the `as u32` cell-count cast in the scan below.
+        debug_assert!(bodies.len() <= u32::MAX as usize);
         let n_cells = cell_keys.len();
         let cell_scan = move |c: u32| {
             let c = c as usize;
@@ -350,14 +390,15 @@ impl World {
                 })
                 .flatten()
         };
-        *contacts = if n_cells < PAR_MIN {
-            (0..n_cells as u32).flat_map(cell_scan).collect()
+        // Extend in place, so the buffer survives from one step to the next.
+        contacts.clear();
+        if n_cells < PAR_MIN {
+            contacts.extend((0..n_cells as u32).flat_map(cell_scan));
         } else {
-            (0..n_cells as u32)
-                .into_par_iter()
-                .flat_map_iter(cell_scan)
-                .collect()
-        };
+            contacts.par_extend((0..n_cells as u32).into_par_iter().flat_map_iter(cell_scan));
+        }
+        // Guards the `as u32` contact-index cast in the CSR fill below.
+        debug_assert!(contacts.len() <= u32::MAX as usize);
 
         // Per-body contact index as CSR: counts, prefix sum, then the fill.
         let n = bodies.len();
@@ -399,7 +440,7 @@ impl World {
         } = self;
         let rest = settings.pair_restitution;
         for _ in 0..RESOLVE_ROUNDS {
-            deltas.clear();
+            // Every slot is rewritten below, so only growth needs a write.
             deltas.resize(contacts.len(), ContactDelta::ZERO);
             let delta_of = |(d, c): (&mut ContactDelta, &Contact)| {
                 *d = contact_delta(&bodies[c.i as usize], &bodies[c.j as usize], c, rest);
@@ -726,5 +767,46 @@ mod tests {
                 "body {i} missing from the sorted cells"
             );
         }
+    }
+
+    #[test]
+    fn next_f32_spans_full_range() {
+        // Fresh generator: this must not disturb the spawn seeds of other tests.
+        let mut rng = Rng(0x853C_49E6_748F_EA9B);
+        let (mut lo, mut hi) = (f32::MAX, f32::MIN);
+        for _ in 0..10_000 {
+            let v = rng.next_f32();
+            lo = lo.min(v);
+            hi = hi.max(v);
+        }
+        assert!(lo < -0.9, "never sampled below {lo}");
+        assert!(hi > 0.9, "never sampled above {hi}");
+    }
+
+    #[test]
+    fn key_part_clamps_extreme_cells_into_the_field() {
+        // No input may escape the 21-bit key field.
+        let cases = [
+            0,
+            1,
+            -1,
+            KEY_OFF - 1,
+            KEY_OFF,
+            -KEY_OFF,
+            -KEY_OFF - 1,
+            1 << 62,
+            -(1 << 62),
+        ];
+        for &v in &cases {
+            assert!(
+                key_part(v) < KEY_SPAN as u64,
+                "key_part({v}) left the field"
+            );
+        }
+        // Values past each edge fold onto the first and last field value.
+        assert_eq!(key_part(-KEY_OFF - 1), 0);
+        assert_eq!(key_part(-KEY_OFF), 0);
+        assert_eq!(key_part(KEY_OFF - 1), (KEY_SPAN - 1) as u64);
+        assert_eq!(key_part(KEY_OFF), (KEY_SPAN - 1) as u64);
     }
 }

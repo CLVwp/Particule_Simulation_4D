@@ -1,0 +1,4 @@
+# Build with the instruction set of the host CPU.
+# Binaries are not portable to older CPUs.
+[build]
+rustflags = ["-C", "target-cpu=native"]

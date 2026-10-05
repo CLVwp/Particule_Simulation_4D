@@ -18,6 +18,13 @@ criterion = "0.8.2"
 name = "engine"
 harness = false
 
+[lints.rust]
+missing_docs = "warn"
+
+[lints.clippy]
+correctness = "deny"
+perf = "warn"
+
 [profile.release]
 opt-level = 3
 lto = "fat"

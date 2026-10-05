@@ -1,0 +1,30 @@
+# Runs format, clippy, and tests on stable. Runs Miri on lib unit tests with nightly.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test
+
+  miri:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri
+      - uses: swatinem/rust-cache@v2
+      # Lib tests are pure computation. Window code is not under test, and a
+      # full Miri run over all dependencies is too slow.
+      - run: cargo +nightly miri test --lib

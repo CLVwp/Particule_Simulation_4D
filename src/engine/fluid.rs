@@ -9,8 +9,26 @@ const SOLVE_ITERS: usize = 4;
 const BUOYANCY: f32 = 6.0;
 /// Fraction of density kept after one step.
 const DENSITY_KEEP: f32 = 0.995;
+/// Emitter width divisor. The half-width is the grid side divided by this.
+const EMITTER_SPAN: usize = 16;
+/// Emitter height, in cells, counted up from the bottom wall.
+const EMITTER_ROWS: usize = 3;
+/// Upward speed the emitter adds to each cell, in units per second.
+const JET_SPEED: f32 = 2.0;
+
+/// The field a wall pass reflects.
+#[derive(Clone, Copy)]
+enum Bnd {
+    /// Density or pressure. Walls mirror the neighbor value.
+    Scalar,
+    /// Horizontal velocity. Vertical walls flip its sign.
+    U,
+    /// Vertical velocity. Horizontal walls flip its sign.
+    V,
+}
 
 /// A 2-D fluid in the x-y plane. Navier-Stokes with viscosity and diffusion.
+#[derive(Debug)]
 pub struct Fluid {
     /// Interior cells per side. Every array holds `n + 2` per side, walls included.
     pub n: usize,
@@ -34,8 +52,13 @@ pub struct Fluid {
 
 impl Fluid {
     /// Creates a zeroed `n` by `n` fluid grid.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the padded grid size overflows `usize`.
     pub fn new(n: usize) -> Self {
-        let size = (n + 2) * (n + 2);
+        let side = n.checked_add(2).expect("fluid grid size overflows");
+        let size = side.checked_mul(side).expect("fluid grid size overflows");
         Fluid {
             n,
             viscosity: 0.0,
@@ -65,12 +88,12 @@ impl Fluid {
         }
         let n = self.n;
         let cx = n / 2;
-        let half = (n / 16).max(1);
-        for j in 1..=3.min(n) {
+        let half = (n / EMITTER_SPAN).max(1);
+        for j in 1..=EMITTER_ROWS.min(n) {
             for i in cx.saturating_sub(half)..=(cx + half) {
                 let k = ix(i, j, n);
                 self.dens[k] += self.emit;
-                self.v[k] += 2.0;
+                self.v[k] += JET_SPEED;
             }
         }
     }
@@ -91,14 +114,14 @@ impl Fluid {
             let a = dt * self.viscosity * (n * n) as f32;
             self.u0.clone_from(&self.u);
             self.v0.clone_from(&self.v);
-            lin_solve(1, &mut self.u, &self.u0, a, 1.0 + 4.0 * a, n);
-            lin_solve(2, &mut self.v, &self.v0, a, 1.0 + 4.0 * a, n);
+            lin_solve(Bnd::U, &mut self.u, &self.u0, a, 1.0 + 4.0 * a, n);
+            lin_solve(Bnd::V, &mut self.v, &self.v0, a, 1.0 + 4.0 * a, n);
         }
         self.project();
         self.u0.clone_from(&self.u);
         self.v0.clone_from(&self.v);
-        advect(1, &mut self.u, &self.u0, &self.u0, &self.v0, dt, n);
-        advect(2, &mut self.v, &self.v0, &self.u0, &self.v0, dt, n);
+        advect(Bnd::U, &mut self.u, &self.u0, &self.u0, &self.v0, dt, n);
+        advect(Bnd::V, &mut self.v, &self.v0, &self.u0, &self.v0, dt, n);
         self.project();
     }
 
@@ -107,10 +130,25 @@ impl Fluid {
         if self.diffusion > 0.0 {
             let a = dt * self.diffusion * (n * n) as f32;
             self.dens0.clone_from(&self.dens);
-            lin_solve(0, &mut self.dens, &self.dens0, a, 1.0 + 4.0 * a, n);
+            lin_solve(
+                Bnd::Scalar,
+                &mut self.dens,
+                &self.dens0,
+                a,
+                1.0 + 4.0 * a,
+                n,
+            );
         }
         self.dens0.clone_from(&self.dens);
-        advect(0, &mut self.dens, &self.dens0, &self.u, &self.v, dt, n);
+        advect(
+            Bnd::Scalar,
+            &mut self.dens,
+            &self.dens0,
+            &self.u,
+            &self.v,
+            dt,
+            n,
+        );
         for d in &mut self.dens {
             *d *= DENSITY_KEEP;
         }
@@ -119,30 +157,38 @@ impl Fluid {
     /// Makes the velocity field divergence-free: the pressure projection.
     fn project(&mut self) {
         let n = self.n;
+        let row = n + 2;
         let h = 1.0 / n as f32;
         // Scratch: divergence in `v0`, pressure in `u0`.
         for j in 1..=n {
-            for i in 1..=n {
-                let k = ix(i, j, n);
-                self.v0[k] = -0.5
-                    * h
-                    * (self.u[ix(i + 1, j, n)] - self.u[ix(i - 1, j, n)] + self.v[ix(i, j + 1, n)]
-                        - self.v[ix(i, j - 1, n)]);
-                self.u0[k] = 0.0;
+            let mid = j * row;
+            let u_row = &self.u[mid..mid + row];
+            let v_up = &self.v[mid + row..mid + 2 * row];
+            let v_dn = &self.v[mid - row..mid];
+            let div = &mut self.v0[mid..mid + row];
+            let prs = &mut self.u0[mid..mid + row];
+            for i in 1..row - 1 {
+                div[i] = -0.5 * h * (u_row[i + 1] - u_row[i - 1] + v_up[i] - v_dn[i]);
+                prs[i] = 0.0;
             }
         }
-        set_bnd(0, &mut self.v0, n);
-        set_bnd(0, &mut self.u0, n);
-        lin_solve(0, &mut self.u0, &self.v0, 1.0, 4.0, n);
+        set_bnd(Bnd::Scalar, &mut self.v0, n);
+        set_bnd(Bnd::Scalar, &mut self.u0, n);
+        lin_solve(Bnd::Scalar, &mut self.u0, &self.v0, 1.0, 4.0, n);
         for j in 1..=n {
-            for i in 1..=n {
-                let k = ix(i, j, n);
-                self.u[k] -= 0.5 * (self.u0[ix(i + 1, j, n)] - self.u0[ix(i - 1, j, n)]) / h;
-                self.v[k] -= 0.5 * (self.u0[ix(i, j + 1, n)] - self.u0[ix(i, j - 1, n)]) / h;
+            let mid = j * row;
+            let p_row = &self.u0[mid..mid + row];
+            let p_up = &self.u0[mid + row..mid + 2 * row];
+            let p_dn = &self.u0[mid - row..mid];
+            let u_row = &mut self.u[mid..mid + row];
+            let v_row = &mut self.v[mid..mid + row];
+            for i in 1..row - 1 {
+                u_row[i] -= 0.5 * (p_row[i + 1] - p_row[i - 1]) / h;
+                v_row[i] -= 0.5 * (p_up[i] - p_dn[i]) / h;
             }
         }
-        set_bnd(1, &mut self.u, n);
-        set_bnd(2, &mut self.v, n);
+        set_bnd(Bnd::U, &mut self.u, n);
+        set_bnd(Bnd::V, &mut self.v, n);
     }
 }
 
@@ -152,19 +198,20 @@ fn ix(i: usize, j: usize, n: usize) -> usize {
 }
 
 /// Gauss-Seidel relaxation for diffusion and the pressure solve.
-fn lin_solve(b: usize, x: &mut [f32], x0: &[f32], a: f32, c: f32, n: usize) {
+fn lin_solve(b: Bnd, x: &mut [f32], x0: &[f32], a: f32, c: f32, n: usize) {
+    let row = n + 2;
+    assert_eq!(x.len(), row * row, "fluid array does not match the grid");
     let inv = c.recip();
     for _ in 0..SOLVE_ITERS {
         for j in 1..=n {
-            for i in 1..=n {
-                let k = ix(i, j, n);
-                x[k] = (a
-                    * (x[ix(i - 1, j, n)]
-                        + x[ix(i + 1, j, n)]
-                        + x[ix(i, j - 1, n)]
-                        + x[ix(i, j + 1, n)])
-                    + x0[k])
-                    * inv;
+            // Split the three rows apart, so the neighbor loads need no checks.
+            let mid = j * row;
+            let (head, next) = x.split_at_mut(mid + row);
+            let (_, pair) = head.split_at_mut(mid - row);
+            let (prev, cur) = pair.split_at_mut(row);
+            let src = &x0[mid..mid + row];
+            for i in 1..row - 1 {
+                cur[i] = (a * (cur[i - 1] + cur[i + 1] + prev[i] + next[i]) + src[i]) * inv;
             }
         }
         set_bnd(b, x, n);
@@ -172,45 +219,57 @@ fn lin_solve(b: usize, x: &mut [f32], x0: &[f32], a: f32, c: f32, n: usize) {
 }
 
 /// Moves `d0` along the velocity field into `d` (semi-Lagrangian advection).
-fn advect(b: usize, d: &mut [f32], d0: &[f32], u: &[f32], v: &[f32], dt: f32, n: usize) {
+fn advect(b: Bnd, d: &mut [f32], d0: &[f32], u: &[f32], v: &[f32], dt: f32, n: usize) {
+    let row = n + 2;
+    assert_eq!(d.len(), row * row, "fluid array does not match the grid");
     let dt0 = dt * n as f32;
     let top = n as f32 + 0.5;
     for j in 1..=n {
-        for i in 1..=n {
-            let k = ix(i, j, n);
-            let x = (i as f32 - dt0 * u[k]).clamp(0.5, top);
-            let y = (j as f32 - dt0 * v[k]).clamp(0.5, top);
+        let mid = j * row;
+        let u_row = &u[mid..mid + row];
+        let v_row = &v[mid..mid + row];
+        let d_row = &mut d[mid..mid + row];
+        for i in 1..row - 1 {
+            let x = (i as f32 - dt0 * u_row[i]).clamp(0.5, top);
+            let y = (j as f32 - dt0 * v_row[i]).clamp(0.5, top);
             let i0 = x as usize;
             let j0 = y as usize;
             let s1 = x - i0 as f32;
             let t1 = y - j0 as f32;
             let (s0, t0) = (1.0 - s1, 1.0 - t1);
-            d[k] = s0 * (t0 * d0[ix(i0, j0, n)] + t1 * d0[ix(i0, j0 + 1, n)])
+            d_row[i] = s0 * (t0 * d0[ix(i0, j0, n)] + t1 * d0[ix(i0, j0 + 1, n)])
                 + s1 * (t0 * d0[ix(i0 + 1, j0, n)] + t1 * d0[ix(i0 + 1, j0 + 1, n)]);
         }
     }
     set_bnd(b, d, n);
 }
 
-/// Solid walls on every side. Flag `b` picks the reflected component.
-fn set_bnd(b: usize, x: &mut [f32], n: usize) {
+/// Solid walls on every side. The field picks the reflected component.
+fn set_bnd(b: Bnd, x: &mut [f32], n: usize) {
+    // Vertical walls flip the horizontal part.
+    // Horizontal walls flip the vertical part.
+    let (flip_x, flip_y) = match b {
+        Bnd::Scalar => (false, false),
+        Bnd::U => (true, false),
+        Bnd::V => (false, true),
+    };
     for i in 1..=n {
-        x[ix(0, i, n)] = if b == 1 {
+        x[ix(0, i, n)] = if flip_x {
             -x[ix(1, i, n)]
         } else {
             x[ix(1, i, n)]
         };
-        x[ix(n + 1, i, n)] = if b == 1 {
+        x[ix(n + 1, i, n)] = if flip_x {
             -x[ix(n, i, n)]
         } else {
             x[ix(n, i, n)]
         };
-        x[ix(i, 0, n)] = if b == 2 {
+        x[ix(i, 0, n)] = if flip_y {
             -x[ix(i, 1, n)]
         } else {
             x[ix(i, 1, n)]
         };
-        x[ix(i, n + 1, n)] = if b == 2 {
+        x[ix(i, n + 1, n)] = if flip_y {
             -x[ix(i, n, n)]
         } else {
             x[ix(i, n, n)]

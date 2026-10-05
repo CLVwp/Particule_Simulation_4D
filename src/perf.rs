@@ -26,6 +26,12 @@ pub fn peak_bytes() -> usize {
 pub struct Counting<A>(pub A);
 
 unsafe impl<A: GlobalAlloc> GlobalAlloc for Counting<A> {
+    /// Allocates memory as described by `layout`.
+    ///
+    /// # Safety
+    ///
+    /// The caller must pass a `Layout` with a nonzero size.
+    /// The caller must free the returned pointer with `dealloc` and this layout.
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         // SAFETY: the caller upholds the GlobalAlloc contract. The inner
         // allocator gets the same size and alignment, so the pointer stays
@@ -38,6 +44,12 @@ unsafe impl<A: GlobalAlloc> GlobalAlloc for Counting<A> {
         ptr
     }
 
+    /// Deallocates memory that `alloc` returned.
+    ///
+    /// # Safety
+    ///
+    /// The caller must pass a pointer that this allocator returned.
+    /// The layout must match the layout used at allocation time.
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
         // SAFETY: ptr came from the inner allocator with this exact layout
         // (see alloc).
