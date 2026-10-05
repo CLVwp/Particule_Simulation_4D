@@ -2,12 +2,15 @@
 //! The simulation view owns the camera, the axes, the floor grid, and the HUD.
 
 use std::collections::HashSet;
+use std::mem::size_of;
 use std::time::Instant;
 
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::*;
 
-use particule_simulation_4d::engine::{BODY_RADIUS, World, thread_count};
+use particule_simulation_4d::engine::fluid::Fluid;
+use particule_simulation_4d::engine::{BODY_RADIUS, Body, PAR_MIN, Shape, World, thread_count};
+use particule_simulation_4d::perf::{allocated_bytes, peak_bytes};
 
 const FIXED_DT: f32 = 1.0 / 60.0;
 const SPAWN_ORIGIN: [f32; 3] = [0.0, 4.0, 0.0];
@@ -15,6 +18,9 @@ const SPAWN_SPEED: f32 = 4.0;
 const GRID_HALF: i32 = 10; // floor grid spans -10..=10 units
 const GRID_STEP: i32 = 1;
 const AXIS_LEN: f32 = 2.0;
+/// The fluid plane spans `FLUID_SPAN` world units and starts at `FLUID_LEFT`.
+const FLUID_LEFT: f32 = -8.0;
+const FLUID_SPAN: f32 = 16.0;
 
 const BG: u32 = 0x0b0e14;
 const FG: Hsla = hsla(0.58, 0.15, 0.9, 1.0);
@@ -22,6 +28,12 @@ const FAINT: Hsla = hsla(0.58, 0.15, 0.85, 0.9);
 
 /// A projected line segment: two screen points and a color.
 type ProjectedLine = ((f32, f32, f32, f32), (f32, f32, f32, f32), Hsla);
+
+/// A projected body: screen x, screen y, radius in px, depth, shape.
+type ProjectedBody = (f32, f32, f32, f32, Shape);
+
+/// A projected fluid cell: screen x, screen y, radius in px, depth, density.
+type ProjectedCell = (f32, f32, f32, f32, f32);
 
 #[derive(Clone, Copy, PartialEq)]
 enum Page {
@@ -82,12 +94,52 @@ enum Drag {
     Pan,
 }
 
+/// Keyboard layout preset for the move bindings.
+#[derive(Clone, Copy, PartialEq)]
+enum KeyLayout {
+    Qwerty,
+    Azerty,
+}
+
+impl KeyLayout {
+    fn label(self) -> &'static str {
+        match self {
+            KeyLayout::Qwerty => "QWERTY",
+            KeyLayout::Azerty => "AZERTY",
+        }
+    }
+
+    /// One key per `MoveAction`, in `MoveAction::all()` order.
+    fn keys(self) -> [&'static str; 6] {
+        match self {
+            KeyLayout::Qwerty => ["w", "s", "a", "d", "e", "q"],
+            KeyLayout::Azerty => ["z", "s", "q", "d", "e", "a"],
+        }
+    }
+}
+
+/// Which law set the sim steps. Newton: rigid bodies. Fluid: Navier-Stokes.
+#[derive(Clone, Copy, PartialEq)]
+enum PhysicsMode {
+    Newton,
+    Fluid,
+}
+
 pub struct SimView {
     page: Page,
     world: World,
     // Key bindings, one key per `MoveAction`, indexed by `action as usize`.
     bindings: [String; 6],
     rebinding: Option<MoveAction>,
+    layout: KeyLayout,
+    // Physics mode and its state.
+    mode: PhysicsMode,
+    fluid: Fluid,
+    // Spawn panel parameters.
+    spawn_shape: Shape,
+    spawn_count: usize,
+    spawn_radius: f32,
+    spawn_speed: f32,
     // Orbit camera: looks at `target` from `dist` along the rotated +z axis.
     target: [f32; 3],
     yaw: f32,
@@ -98,8 +150,11 @@ pub struct SimView {
     last_mouse: Option<Point<Pixels>>,
     keys: HashSet<String>,
     focus: FocusHandle,
-    // Debug HUD values.
+    // Debug HUD values. F1 toggles the overlay.
+    debug: bool,
     fps: f32,
+    step_ms: f32,
+    scene_ms: f32,
     last_frame: Option<Instant>,
 }
 
@@ -112,6 +167,13 @@ impl SimView {
             world,
             bindings: MoveAction::all().map(|a| a.default_key().to_string()),
             rebinding: None,
+            layout: KeyLayout::Qwerty,
+            mode: PhysicsMode::Newton,
+            fluid: Fluid::new(64),
+            spawn_shape: Shape::Sphere,
+            spawn_count: 1000,
+            spawn_radius: BODY_RADIUS,
+            spawn_speed: SPAWN_SPEED,
             target: [0.0, 1.0, 0.0],
             yaw: 0.6,
             pitch: 0.35,
@@ -120,7 +182,10 @@ impl SimView {
             last_mouse: None,
             keys: HashSet::new(),
             focus: cx.focus_handle(),
+            debug: false,
             fps: 60.0,
+            step_ms: 0.0,
+            scene_ms: 0.0,
             last_frame: None,
         }
     }
@@ -128,6 +193,22 @@ impl SimView {
     /// True while the key bound to `action` is held down.
     fn held(&self, action: MoveAction) -> bool {
         self.keys.contains(&self.bindings[action as usize])
+    }
+
+    /// Applies the active layout preset to every binding.
+    fn apply_layout(&mut self) {
+        self.bindings = self.layout.keys().map(str::to_string);
+    }
+
+    /// Spawns `n` bodies with the panel parameters.
+    fn spawn_from_panel(&mut self, n: usize) {
+        self.world.spawn(
+            n,
+            SPAWN_ORIGIN,
+            self.spawn_speed,
+            self.spawn_shape,
+            self.spawn_radius,
+        );
     }
 
     /// Applies the held keys: slides follow the camera, rise and sink use the world axis.
@@ -168,6 +249,10 @@ impl SimView {
     /// Stores a pressed key. While a rebind waits, the next key becomes the binding.
     fn handle_key_down(&mut self, ev: &KeyDownEvent) {
         let key = ev.keystroke.key.clone();
+        if key == "f1" {
+            self.debug = !self.debug;
+            return;
+        }
         if let Some(action) = self.rebinding {
             if key != "escape" {
                 self.bindings[action as usize] = key;
@@ -270,6 +355,23 @@ impl SimView {
     }
 
     fn render_settings(&mut self, cx: &mut Context<Self>) -> Div {
+        let (qwerty, azerty) = (
+            Button::new("layout-qwerty").label(KeyLayout::Qwerty.label()),
+            Button::new("layout-azerty").label(KeyLayout::Azerty.label()),
+        );
+        let (qwerty, azerty) = (
+            if self.layout == KeyLayout::Qwerty {
+                qwerty.primary()
+            } else {
+                qwerty
+            },
+            if self.layout == KeyLayout::Azerty {
+                azerty.primary()
+            } else {
+                azerty
+            },
+        );
+
         let mut rows = div().flex().flex_col().gap_2();
         for action in MoveAction::all() {
             let listening = self.rebinding == Some(action);
@@ -327,6 +429,21 @@ impl SimView {
                             .text_size(px(12.0))
                             .child("Pick an action. Then press the new key. Escape cancels."),
                     )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_6()
+                            .child(div().w(px(110.0)).text_color(FAINT).child("Key layout"))
+                            .child(qwerty.on_click(cx.listener(|this, _: &ClickEvent, _, _| {
+                                this.layout = KeyLayout::Qwerty;
+                                this.apply_layout();
+                            })))
+                            .child(azerty.on_click(cx.listener(|this, _: &ClickEvent, _, _| {
+                                this.layout = KeyLayout::Azerty;
+                                this.apply_layout();
+                            }))),
+                    )
                     .child(rows)
                     .child(Button::new("back").label("Back").on_click(cx.listener(
                         |this, _: &ClickEvent, _, _| {
@@ -350,7 +467,13 @@ impl SimView {
             this.last_frame = Some(now);
 
             this.apply_keys();
-            this.world.step(FIXED_DT);
+            let t = Instant::now();
+            match this.mode {
+                PhysicsMode::Newton => this.world.step(FIXED_DT),
+                PhysicsMode::Fluid => this.fluid.step(FIXED_DT),
+            }
+            let ms = (t.elapsed().as_secs_f32() * 1000.0).min(1000.0);
+            this.step_ms = this.step_ms * 0.9 + ms * 0.1;
             cx.notify();
         });
 
@@ -359,13 +482,45 @@ impl SimView {
         let dist = self.dist;
 
         // Project everything up-front; the paint closure only draws.
-        let mut points: Vec<(f32, f32, f32, f32)> = self
-            .world
-            .bodies
-            .iter()
-            .map(|b| self.project(b.pos, w, h))
-            .collect();
-        points.sort_unstable_by(|a, b| b.3.total_cmp(&a.3)); // painter's algorithm: far first
+        let scene = Instant::now();
+        // Newton: (x, y, radius_px, depth, shape) per body.
+        // Fluid: (x, y, radius_px, density, depth) per lit cell.
+        let (points, fluid_quads): (Vec<ProjectedBody>, Vec<ProjectedCell>) =
+            if self.mode == PhysicsMode::Newton {
+                let mut points: Vec<ProjectedBody> = self
+                    .world
+                    .bodies
+                    .iter()
+                    .map(|b| {
+                        let (x, y, focal, z) = self.project(b.pos, w, h);
+                        (x, y, (b.radius * focal / z).max(1.5), z, b.shape)
+                    })
+                    .collect();
+                points.sort_unstable_by(|a, b| b.3.total_cmp(&a.3)); // painter's algorithm: far first
+                (points, Vec::new())
+            } else {
+                let n = self.fluid.n;
+                let cell = FLUID_SPAN / n as f32;
+                let mut quads: Vec<ProjectedCell> = Vec::new();
+                for j in 1..=n {
+                    for i in 1..=n {
+                        let d = self.fluid.dens[i + (n + 2) * j];
+                        if d <= 0.02 {
+                            continue;
+                        }
+                        let xw = FLUID_LEFT + (i as f32 - 0.5) * cell;
+                        let yw = (j as f32 - 0.5) * cell;
+                        let (x, y, focal, z) = self.project([xw, yw, 0.0], w, h);
+                        let rad = (cell * focal / z * 0.5).max(1.0);
+                        quads.push((x, y, rad, d, z));
+                    }
+                }
+                quads.sort_unstable_by(|a, b| b.4.total_cmp(&a.4));
+                (Vec::new(), quads)
+            };
+        let ms = (scene.elapsed().as_secs_f32() * 1000.0).min(1000.0);
+        self.scene_ms = self.scene_ms * 0.9 + ms * 0.1;
+        let quads_drawn = points.len() + fluid_quads.len();
 
         // Floor grid.
         let span = (GRID_HALF * GRID_STEP) as f32;
@@ -427,6 +582,7 @@ impl SimView {
             ))
             .child("Drag: orbit. Shift+drag or middle-drag: pan. Wheel: zoom.")
             .child("Movement follows the camera.")
+            .child("F1: engine stats.")
             .child(Button::new("menu").label("Menu").on_click(cx.listener(
                 |this, _: &ClickEvent, _, _| {
                     this.page = Page::Menu;
@@ -442,12 +598,12 @@ impl SimView {
             .gap_2()
             .child(Button::new("add-100").label("+100").on_click(cx.listener(
                 |this, _: &ClickEvent, _, _| {
-                    this.world.spawn_wave(100, SPAWN_ORIGIN, SPAWN_SPEED);
+                    this.spawn_from_panel(100);
                 },
             )))
             .child(Button::new("add-1000").label("+1000").on_click(cx.listener(
                 |this, _: &ClickEvent, _, _| {
-                    this.world.spawn_wave(1000, SPAWN_ORIGIN, SPAWN_SPEED);
+                    this.spawn_from_panel(1000);
                 },
             )))
             .child(Button::new("clear").label("Clear").on_click(cx.listener(
@@ -538,18 +694,36 @@ impl SimView {
                     for (a, b) in grid {
                         paint_line(window, a, b, hsla(0.55, 0.4, 0.5, 0.35), 0.7);
                     }
-                    for (x, y, focal, z) in points {
-                        let rad = (BODY_RADIUS * focal / z).max(1.5);
+                    for (x, y, rad, d, _z) in &fluid_quads {
+                        let alpha = (0.15 + 0.75 * d).clamp(0.15, 0.9);
+                        let light = (0.45 + 0.2 * d).clamp(0.4, 0.75);
+                        window.paint_quad(fill(
+                            Bounds::new(
+                                point(px(x - rad), px(y - rad)),
+                                size(px(rad * 2.0), px(rad * 2.0)),
+                            ),
+                            hsla(0.55, 0.85, light, alpha),
+                        ));
+                    }
+                    for (x, y, rad, z, shape) in &points {
                         let alpha = (1.5 - z / dist).clamp(0.25, 1.0);
+                        let color = match shape {
+                            Shape::Sphere => hsla(0.53, 0.9, 0.6, alpha),
+                            Shape::Cube => hsla(0.08, 0.9, 0.6, alpha),
+                        };
+                        let round = match shape {
+                            Shape::Sphere => px(*rad),
+                            Shape::Cube => px(0.0),
+                        };
                         window.paint_quad(
                             fill(
                                 Bounds::new(
                                     point(px(x - rad), px(y - rad)),
                                     size(px(rad * 2.0), px(rad * 2.0)),
                                 ),
-                                hsla(0.53, 0.9, 0.6, alpha),
+                                color,
                             )
-                            .corner_radii(px(rad)),
+                            .corner_radii(round),
                         );
                     }
                 },
@@ -565,7 +739,375 @@ impl SimView {
             }))
             .child(hud)
             .child(toolbar)
+            .child(self.render_panels(cx))
+            .children(self.debug.then(|| self.render_debug(quads_drawn, w, h)))
     }
+
+    /// Right-side panels: object spawn and physics laws.
+    fn render_panels(&mut self, cx: &mut Context<Self>) -> Div {
+        let (sphere, cube) = (
+            Button::new("shape-sphere").label("Sphere"),
+            Button::new("shape-cube").label("Cube"),
+        );
+        let (sphere, cube) = (
+            if self.spawn_shape == Shape::Sphere {
+                sphere.primary()
+            } else {
+                sphere
+            },
+            if self.spawn_shape == Shape::Cube {
+                cube.primary()
+            } else {
+                cube
+            },
+        );
+        let (newton, fluid) = (
+            Button::new("mode-newton").label("Newton"),
+            Button::new("mode-fluid").label("Fluid (N-S)"),
+        );
+        let (newton, fluid) = (
+            if self.mode == PhysicsMode::Newton {
+                newton.primary()
+            } else {
+                newton
+            },
+            if self.mode == PhysicsMode::Fluid {
+                fluid.primary()
+            } else {
+                fluid
+            },
+        );
+
+        let spawn_panel = div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .w(px(250.0))
+            .p_3()
+            .rounded_lg()
+            .bg(rgb(0x151b23))
+            .child(div().text_size(px(13.0)).text_color(FG).child("Spawn"))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(div().w(px(64.0)).text_color(FAINT).child("Shape"))
+                    .child(sphere.on_click(cx.listener(|this, _: &ClickEvent, _, _| {
+                        this.spawn_shape = Shape::Sphere;
+                    })))
+                    .child(cube.on_click(cx.listener(|this, _: &ClickEvent, _, _| {
+                        this.spawn_shape = Shape::Cube;
+                    }))),
+            )
+            .child(stepper(
+                "count",
+                "Count",
+                self.spawn_count.to_string(),
+                cx,
+                count_dec,
+                count_inc,
+            ))
+            .child(stepper(
+                "size",
+                "Size",
+                format!("{:.2}", self.spawn_radius),
+                cx,
+                radius_dec,
+                radius_inc,
+            ))
+            .child(stepper(
+                "speed",
+                "Speed",
+                format!("{:.1}", self.spawn_speed),
+                cx,
+                speed_dec,
+                speed_inc,
+            ))
+            .child(
+                Button::new("spawn")
+                    .primary()
+                    .label("Spawn")
+                    .on_click(cx.listener(|this, _: &ClickEvent, _, _| {
+                        this.spawn_from_panel(this.spawn_count);
+                    })),
+            );
+
+        let law_panel = div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .w(px(250.0))
+            .p_3()
+            .rounded_lg()
+            .bg(rgb(0x151b23))
+            .child(div().text_size(px(13.0)).text_color(FG).child("Physics"))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(div().w(px(64.0)).text_color(FAINT).child("Laws"))
+                    .child(newton.on_click(cx.listener(|this, _: &ClickEvent, _, _| {
+                        this.mode = PhysicsMode::Newton;
+                    })))
+                    .child(fluid.on_click(cx.listener(|this, _: &ClickEvent, _, _| {
+                        this.mode = PhysicsMode::Fluid;
+                    }))),
+            );
+
+        let law_panel = match self.mode {
+            PhysicsMode::Newton => law_panel
+                .child(stepper(
+                    "gravity",
+                    "Gravity",
+                    format!("{:.1}", self.world.settings.gravity),
+                    cx,
+                    gravity_dec,
+                    gravity_inc,
+                ))
+                .child(stepper(
+                    "bounce",
+                    "Bounce",
+                    format!("{:.2}", self.world.settings.floor_restitution),
+                    cx,
+                    bounce_dec,
+                    bounce_inc,
+                ))
+                .child(stepper(
+                    "friction",
+                    "Friction",
+                    format!("{:.2}", self.world.settings.ground_friction),
+                    cx,
+                    friction_dec,
+                    friction_inc,
+                )),
+            PhysicsMode::Fluid => law_panel
+                .child(stepper(
+                    "viscosity",
+                    "Viscosity",
+                    fmt_rate(self.fluid.viscosity),
+                    cx,
+                    visc_dec,
+                    visc_inc,
+                ))
+                .child(stepper(
+                    "diffusion",
+                    "Diffusion",
+                    fmt_rate(self.fluid.diffusion),
+                    cx,
+                    diff_dec,
+                    diff_inc,
+                ))
+                .child(stepper(
+                    "emit",
+                    "Emit",
+                    format!("{:.1}", self.fluid.emit),
+                    cx,
+                    emit_dec,
+                    emit_inc,
+                )),
+        };
+
+        div()
+            .absolute()
+            .top_2()
+            .right_2()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(spawn_panel)
+            .child(law_panel)
+    }
+
+    /// Bottom-left overlay with CPU, GPU, and memory stats.
+    // ponytail: per-thread OS load needs Win32 FFI; the phase split stands in for it
+    fn render_debug(&self, quads: usize, w: f32, h: f32) -> Div {
+        let head = |t: &str| {
+            div()
+                .text_color(FG)
+                .text_size(px(12.0))
+                .child(t.to_string())
+        };
+        let line = |t: String| div().text_color(FAINT).child(t);
+        let p = self.world.phase_ms;
+        let step_total: f32 = p.iter().sum();
+        let phase = |name: &str, ms: f32| {
+            let share = if step_total > 0.0 {
+                100.0 * ms / step_total
+            } else {
+                0.0
+            };
+            format!("{name:<9} {ms:7.3} ms {share:5.1} %")
+        };
+        let path = if self.mode == PhysicsMode::Fluid {
+            format!("fluid grid {} x {}", self.fluid.n, self.fluid.n)
+        } else if self.world.bodies.len() >= PAR_MIN {
+            "parallel".to_string()
+        } else {
+            "inline".to_string()
+        };
+
+        div()
+            .absolute()
+            .bottom_2()
+            .left_2()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .p_3()
+            .rounded_lg()
+            .bg(rgb(0x10141b))
+            .text_size(px(11.0))
+            .child(head("CPU"))
+            .child(line(format!(
+                "FPS {:.0}   frame {:.1} ms   step {:.3} ms",
+                self.fps,
+                1000.0 / self.fps,
+                self.step_ms
+            )))
+            .child(line(format!(
+                "bodies {}   contacts {}   threads {}",
+                self.world.bodies.len(),
+                self.world.contact_count(),
+                thread_count()
+            )))
+            .child(line(format!("path: {path}   PAR_MIN {PAR_MIN}")))
+            .child(line(phase("integrate", p[0])))
+            .child(line(phase("grid", p[1])))
+            .child(line(phase("contacts", p[2])))
+            .child(line(phase("resolve", p[3])))
+            .child(line(phase("floor", p[4])))
+            .child(head("GPU"))
+            .child(line(format!("viewport {:.0} x {:.0} px", w, h)))
+            .child(line(format!("quads painted {quads}")))
+            .child(line(format!(
+                "scene (project + sort) {:.3} ms",
+                self.scene_ms
+            )))
+            .child(line("gpui does not expose GPU timers.".to_string()))
+            .child(head("Memory"))
+            .child(line(format!(
+                "in use {:.1} MB   peak {:.1} MB",
+                allocated_bytes() as f32 / 1048576.0,
+                peak_bytes() as f32 / 1048576.0
+            )))
+            .child(line(format!(
+                "bodies array {:.2} MB",
+                (size_of::<Body>() * self.world.bodies.len()) as f32 / 1048576.0
+            )))
+    }
+}
+
+fn fmt_rate(x: f32) -> String {
+    if x <= 0.0 {
+        "0".to_string()
+    } else {
+        format!("{x:.1e}")
+    }
+}
+
+fn count_dec(v: &mut SimView) {
+    v.spawn_count = v.spawn_count.saturating_sub(100);
+}
+
+fn count_inc(v: &mut SimView) {
+    v.spawn_count = (v.spawn_count + 100).min(100_000);
+}
+
+fn radius_dec(v: &mut SimView) {
+    v.spawn_radius = (v.spawn_radius - 0.05).max(0.05);
+}
+
+fn radius_inc(v: &mut SimView) {
+    v.spawn_radius = (v.spawn_radius + 0.05).min(2.0);
+}
+
+fn speed_dec(v: &mut SimView) {
+    v.spawn_speed = (v.spawn_speed - 1.0).max(0.0);
+}
+
+fn speed_inc(v: &mut SimView) {
+    v.spawn_speed = (v.spawn_speed + 1.0).min(30.0);
+}
+
+fn gravity_dec(v: &mut SimView) {
+    v.world.settings.gravity = (v.world.settings.gravity - 1.0).max(-40.0);
+}
+
+fn gravity_inc(v: &mut SimView) {
+    v.world.settings.gravity = (v.world.settings.gravity + 1.0).min(0.0);
+}
+
+fn bounce_dec(v: &mut SimView) {
+    v.world.settings.floor_restitution = (v.world.settings.floor_restitution - 0.05).max(0.0);
+}
+
+fn bounce_inc(v: &mut SimView) {
+    v.world.settings.floor_restitution = (v.world.settings.floor_restitution + 0.05).min(1.0);
+}
+
+fn friction_dec(v: &mut SimView) {
+    v.world.settings.ground_friction = (v.world.settings.ground_friction - 0.05).max(0.0);
+}
+
+fn friction_inc(v: &mut SimView) {
+    v.world.settings.ground_friction = (v.world.settings.ground_friction + 0.05).min(1.0);
+}
+
+fn visc_dec(v: &mut SimView) {
+    let x = v.fluid.viscosity;
+    v.fluid.viscosity = if x <= 1e-6 { 0.0 } else { x / 2.0 };
+}
+
+fn visc_inc(v: &mut SimView) {
+    let x = v.fluid.viscosity;
+    v.fluid.viscosity = if x <= 0.0 { 1e-6 } else { (x * 2.0).min(1e-2) };
+}
+
+fn diff_dec(v: &mut SimView) {
+    let x = v.fluid.diffusion;
+    v.fluid.diffusion = if x <= 1e-6 { 0.0 } else { x / 2.0 };
+}
+
+fn diff_inc(v: &mut SimView) {
+    let x = v.fluid.diffusion;
+    v.fluid.diffusion = if x <= 0.0 { 1e-6 } else { (x * 2.0).min(1e-2) };
+}
+
+fn emit_dec(v: &mut SimView) {
+    v.fluid.emit = (v.fluid.emit - 0.5).max(0.0);
+}
+
+fn emit_inc(v: &mut SimView) {
+    v.fluid.emit = (v.fluid.emit + 0.5).min(10.0);
+}
+
+/// One parameter row: label, minus, value, plus. `dec` and `inc` apply one step.
+fn stepper(
+    id: &'static str,
+    label: &str,
+    value: String,
+    cx: &mut Context<SimView>,
+    dec: fn(&mut SimView),
+    inc: fn(&mut SimView),
+) -> Div {
+    div()
+        .flex()
+        .items_center()
+        .gap_2()
+        .child(div().w(px(64.0)).text_color(FAINT).child(label.to_string()))
+        .child(
+            Button::new((id, 1usize))
+                .label("-")
+                .on_click(cx.listener(move |this, _: &ClickEvent, _, _| dec(this))),
+        )
+        .child(div().w(px(64.0)).text_color(FG).child(value))
+        .child(
+            Button::new((id, 2usize))
+                .label("+")
+                .on_click(cx.listener(move |this, _: &ClickEvent, _, _| inc(this))),
+        )
 }
 
 /// Paints a world-space line segment as a thin filled quad.

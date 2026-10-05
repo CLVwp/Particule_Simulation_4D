@@ -3,8 +3,12 @@
 //! `step` splits its work over the rayon pool. The pool has one worker per
 //! logical core, detected from the CPU at startup.
 
+use std::time::Instant;
+
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
+
+pub mod fluid;
 
 // ponytail: hand-rolled LCG instead of the `rand` crate; swap if we need real distributions
 struct Rng(u64);
@@ -34,14 +38,44 @@ pub const BODY_RADIUS: f32 = 0.1;
 const PAIR_RESTITUTION: f32 = 0.6;
 const SLOP: f32 = 0.001; // allowed penetration
 const CORRECTION: f32 = 0.8; // share of overlap removed each step
-const CELL_SIZE: f32 = 2.0 * BODY_RADIUS; // grid cell: one body diameter
 /// Parallel solve rounds per step. Two rounds keep piles stiff enough.
 const RESOLVE_ROUNDS: usize = 2;
 /// High bit of a `body_contacts` tag. Set when the body is the `j` side.
 const J_SIDE: u32 = 1 << 31;
 /// Pool work starts above this body count.
 /// ponytail: bench shows 16-thread sync is a net loss at 1000 bodies, a win at 4000
-const PAR_MIN: usize = 2048;
+pub const PAR_MIN: usize = 2048;
+
+/// Tunable laws of motion. `Default` matches the constants above.
+#[derive(Clone, Copy, Debug)]
+pub struct SimSettings {
+    /// Downward acceleration, in units per second squared.
+    pub gravity: f32,
+    /// Fraction of vertical speed kept after a floor bounce.
+    pub floor_restitution: f32,
+    /// Fraction of horizontal speed kept while a body touches the floor.
+    pub ground_friction: f32,
+    /// Fraction of relative speed kept when two bodies collide.
+    pub pair_restitution: f32,
+}
+
+impl Default for SimSettings {
+    fn default() -> Self {
+        SimSettings {
+            gravity: GRAVITY,
+            floor_restitution: FLOOR_RESTITUTION,
+            ground_friction: GROUND_FRICTION,
+            pair_restitution: PAIR_RESTITUTION,
+        }
+    }
+}
+
+/// Visual shape of a body. Physics always uses a sphere of the same radius.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Shape {
+    Sphere,
+    Cube,
+}
 
 /// Logical cores visible to this process.
 pub fn thread_count() -> usize {
@@ -56,6 +90,7 @@ pub struct Body {
     pub pos: [f32; 3],
     pub vel: [f32; 3],
     pub radius: f32,
+    pub shape: Shape,
 }
 
 impl Body {
@@ -92,17 +127,39 @@ impl ContactDelta {
 }
 
 /// Particle positions and velocities in x, y, z (time lives in `step(dt)`).
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct World {
     pub bodies: Vec<Body>,
-    /// Spatial hash grid. Cleared each step; the cell buffers stay allocated.
-    grid: FxHashMap<[i32; 3], Vec<u32>>,
+    /// Laws of motion. Change them freely between steps.
+    pub settings: SimSettings,
+    /// Grid cell edge. Grows to fit the biggest spawned radius.
+    cell_size: f32,
     /// Candidate contacts found in the grid this step.
     contacts: Vec<Contact>,
     /// Per-contact solve results for the current round.
     deltas: Vec<ContactDelta>,
     /// For each body: tags of the contacts that touch it. Bit `J_SIDE` marks the `j` side.
     body_contacts: Vec<Vec<u32>>,
+    /// Wall time of the last step per phase, in ms:
+    /// integrate, grid, contacts, resolve, floor. Read by the debug overlay.
+    pub phase_ms: [f32; 5],
+    /// Spatial hash grid. Cleared each step; the cell buffers stay allocated.
+    grid: FxHashMap<[i32; 3], Vec<u32>>,
+}
+
+impl Default for World {
+    fn default() -> Self {
+        World {
+            bodies: Vec::new(),
+            settings: SimSettings::default(),
+            cell_size: 2.0 * BODY_RADIUS,
+            contacts: Vec::new(),
+            deltas: Vec::new(),
+            body_contacts: Vec::new(),
+            phase_ms: [0.0; 5],
+            grid: FxHashMap::default(),
+        }
+    }
 }
 
 impl World {
@@ -110,8 +167,14 @@ impl World {
         World::default()
     }
 
+    /// Candidate contacts found in the last step.
+    pub fn contact_count(&self) -> usize {
+        self.contacts.len()
+    }
+
     /// Spawns `n` bodies at `origin` with fountain-like velocities.
-    pub fn spawn_wave(&mut self, n: usize, origin: [f32; 3], speed: f32) {
+    pub fn spawn(&mut self, n: usize, origin: [f32; 3], speed: f32, shape: Shape, radius: f32) {
+        self.cell_size = self.cell_size.max(2.0 * radius);
         let mut rng = Rng(0x2545F4914F6CDD1D ^ n as u64);
         for _ in 0..n {
             self.bodies.push(Body {
@@ -125,27 +188,45 @@ impl World {
                     speed * (0.7 + 0.3 * rng.next_f32()),
                     rng.next_f32() * speed * 0.4,
                 ],
-                radius: BODY_RADIUS,
+                radius,
+                shape,
             });
         }
     }
 
+    /// Spawns spheres at the default radius.
+    pub fn spawn_wave(&mut self, n: usize, origin: [f32; 3], speed: f32) {
+        self.spawn(n, origin, speed, Shape::Sphere, BODY_RADIUS);
+    }
+
     pub fn clear(&mut self) {
         self.bodies.clear();
+        self.cell_size = 2.0 * BODY_RADIUS;
     }
 
     pub fn step(&mut self, dt: f32) {
+        let t = Instant::now();
         self.integrate(dt);
+        self.phase_ms[0] = ms_since(t);
+        let t = Instant::now();
         self.build_grid();
+        self.phase_ms[1] = ms_since(t);
+        let t = Instant::now();
         self.build_contacts();
+        self.phase_ms[2] = ms_since(t);
+        let t = Instant::now();
         self.resolve();
+        self.phase_ms[3] = ms_since(t);
+        let t = Instant::now();
         self.collide_floor();
+        self.phase_ms[4] = ms_since(t);
     }
 
     /// Explicit Euler integration, split across the pool.
     fn integrate(&mut self, dt: f32) {
+        let g = self.settings.gravity;
         par_each(&mut self.bodies, |b| {
-            b.vel[1] += GRAVITY * dt;
+            b.vel[1] += g * dt;
             b.pos[0] += b.vel[0] * dt;
             b.pos[1] += b.vel[1] * dt;
             b.pos[2] += b.vel[2] * dt;
@@ -155,12 +236,18 @@ impl World {
     /// Fills the spatial hash grid. One cell holds one body diameter.
     /// ponytail: O(n) grid with 27-cell neighborhoods; a BVH only pays off past ~50k bodies
     fn build_grid(&mut self) {
-        let World { grid, bodies, .. } = self;
+        let World {
+            grid,
+            bodies,
+            cell_size,
+            ..
+        } = self;
+        let cs = *cell_size;
         for cell in grid.values_mut() {
             cell.clear();
         }
         for (i, b) in bodies.iter().enumerate() {
-            grid.entry(cell_of(b.pos)).or_default().push(i as u32);
+            grid.entry(cell_of(b.pos, cs)).or_default().push(i as u32);
         }
     }
 
@@ -172,12 +259,14 @@ impl World {
             bodies,
             contacts,
             body_contacts,
+            cell_size,
             ..
         } = self;
         let grid = &*grid;
         let bodies = &*bodies;
+        let cs = *cell_size;
         let scan = |i: u32| {
-            let c = cell_of(bodies[i as usize].pos);
+            let c = cell_of(bodies[i as usize].pos, cs);
             let mi = bodies[i as usize].mass();
             (-1..=1i32)
                 .flat_map(move |dx| {
@@ -222,13 +311,15 @@ impl World {
             contacts,
             deltas,
             body_contacts,
+            settings,
             ..
         } = self;
+        let rest = settings.pair_restitution;
         for _ in 0..RESOLVE_ROUNDS {
             deltas.clear();
             deltas.resize(contacts.len(), ContactDelta::ZERO);
             let delta_of = |(d, c): (&mut ContactDelta, &Contact)| {
-                *d = contact_delta(&bodies[c.i as usize], &bodies[c.j as usize], c);
+                *d = contact_delta(&bodies[c.i as usize], &bodies[c.j as usize], c, rest);
             };
             if deltas.len() < PAR_MIN {
                 deltas.iter_mut().zip(contacts.iter()).for_each(delta_of);
@@ -264,15 +355,22 @@ impl World {
 
     /// Floor plane at `FLOOR_Y`, spheres rest on top of it.
     fn collide_floor(&mut self) {
+        let rest = self.settings.floor_restitution;
+        let friction = self.settings.ground_friction;
         par_each(&mut self.bodies, |b| {
             if b.pos[1] - b.radius < FLOOR_Y && b.vel[1] < 0.0 {
                 b.pos[1] = FLOOR_Y + b.radius;
-                b.vel[1] = -b.vel[1] * FLOOR_RESTITUTION;
-                b.vel[0] *= GROUND_FRICTION;
-                b.vel[2] *= GROUND_FRICTION;
+                b.vel[1] = -b.vel[1] * rest;
+                b.vel[0] *= friction;
+                b.vel[2] *= friction;
             }
         });
     }
+}
+
+/// Wall time since `t`, in milliseconds.
+fn ms_since(t: Instant) -> f32 {
+    t.elapsed().as_secs_f32() * 1000.0
 }
 
 /// Runs `f` on every element, on the pool above `PAR_MIN`, inline below.
@@ -285,7 +383,7 @@ fn par_each<T: Send>(slice: &mut [T], f: impl Fn(&mut T) + Sync + Send) {
 }
 
 /// Impulse + positional correction between two spheres, from their current state.
-fn contact_delta(a: &Body, b: &Body, c: &Contact) -> ContactDelta {
+fn contact_delta(a: &Body, b: &Body, c: &Contact, rest: f32) -> ContactDelta {
     let d = [
         b.pos[0] - a.pos[0],
         b.pos[1] - a.pos[1],
@@ -307,7 +405,7 @@ fn contact_delta(a: &Body, b: &Body, c: &Contact) -> ContactDelta {
     ];
     let vn = rv[0] * n[0] + rv[1] * n[1] + rv[2] * n[2];
     let impulse = if vn < 0.0 {
-        -(1.0 + PAIR_RESTITUTION) * vn / (1.0 / c.mi + 1.0 / c.mj)
+        -(1.0 + rest) * vn / (1.0 / c.mi + 1.0 / c.mj)
     } else {
         0.0
     };
@@ -337,11 +435,11 @@ fn contact_share(d: &ContactDelta, c: &Contact, j_side: bool) -> ([f32; 3], [f32
     )
 }
 
-fn cell_of(p: [f32; 3]) -> [i32; 3] {
+fn cell_of(p: [f32; 3], cell_size: f32) -> [i32; 3] {
     [
-        (p[0] / CELL_SIZE).floor() as i32,
-        (p[1] / CELL_SIZE).floor() as i32,
-        (p[2] / CELL_SIZE).floor() as i32,
+        (p[0] / cell_size).floor() as i32,
+        (p[1] / cell_size).floor() as i32,
+        (p[2] / cell_size).floor() as i32,
     ]
 }
 
@@ -375,11 +473,13 @@ mod tests {
             pos: [-0.5, 2.0, 0.0],
             vel: [0.5, 0.0, 0.0],
             radius: BODY_RADIUS,
+            shape: Shape::Sphere,
         });
         w.bodies.push(Body {
             pos: [0.5, 2.0, 0.0],
             vel: [-0.5, 0.0, 0.0],
             radius: BODY_RADIUS,
+            shape: Shape::Sphere,
         });
         let min_d = 2.0 * BODY_RADIUS;
         let mut bounced = false;
@@ -420,5 +520,50 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn gravity_setting_controls_fall_speed() {
+        // Same spawn seed, so the only difference is the law of motion.
+        let mut light = World::new();
+        light.settings.gravity = -2.0;
+        let mut heavy = World::new();
+        heavy.settings.gravity = -20.0;
+        light.spawn_wave(1, [0.0, 3.0, 0.0], 0.0);
+        heavy.spawn_wave(1, [0.0, 3.0, 0.0], 0.0);
+        for _ in 0..30 {
+            light.step(1.0 / 60.0);
+            heavy.step(1.0 / 60.0);
+        }
+        assert!(
+            heavy.bodies[0].pos[1] < light.bodies[0].pos[1],
+            "stronger gravity must fall faster"
+        );
+    }
+
+    #[test]
+    fn custom_size_and_shape_bodies_collide() {
+        let mut w = World::new();
+        w.spawn(2, [0.0, 2.0, 0.0], 0.0, Shape::Cube, 0.5);
+        assert_eq!(w.bodies[0].shape, Shape::Cube);
+        assert_eq!(w.bodies[0].radius, 0.5);
+        // Deterministic head-on setup: overwrite the fountain jitter.
+        w.bodies[0].pos = [-1.0, 2.0, 0.0];
+        w.bodies[0].vel = [0.5, 0.0, 0.0];
+        w.bodies[1].pos = [1.0, 2.0, 0.0];
+        w.bodies[1].vel = [-0.5, 0.0, 0.0];
+        let min_d = 1.0;
+        let mut bounced = false;
+        for _ in 0..600 {
+            w.step(1.0 / 60.0);
+            let d = (w.bodies[0].pos[0] - w.bodies[1].pos[0]).abs()
+                + (w.bodies[0].pos[1] - w.bodies[1].pos[1]).abs()
+                + (w.bodies[0].pos[2] - w.bodies[1].pos[2]).abs();
+            assert!(d >= min_d - 0.005, "big bodies overlap");
+            if d < min_d + 0.1 && w.bodies[0].vel[0] < 0.0 && w.bodies[1].vel[0] > 0.0 {
+                bounced = true;
+            }
+        }
+        assert!(bounced, "big bodies never bounced off each other");
     }
 }

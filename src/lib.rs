@@ -8,3 +8,4 @@
 #![warn(clippy::perf)]
 
 pub mod engine;
+pub mod perf;
