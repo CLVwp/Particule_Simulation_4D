@@ -22,8 +22,9 @@ pub(super) const J_SIDE: u32 = 1 << 31;
 const _: () = assert!(std::mem::size_of::<Contact>() == 16);
 
 impl World {
-    /// Finds candidate pairs cell by cell. Each cell binary-searches its
-    /// stencil neighbors in the unique keys, then emits body pairs.
+    /// Finds overlapping pairs cell by cell. Each cell binary-searches its
+    /// stencil neighbors in the unique keys, then emits body pairs. A pair is
+    /// kept only when the two spheres overlap.
     ///
     /// The stencil holds self plus the 13 lex-positive offsets of the 27-cell
     /// neighborhood. Every pair of cells within reach meets in exactly one
@@ -76,11 +77,23 @@ impl World {
                                 if same && bi >= bj {
                                     return None;
                                 }
+                                let (pi, pj) = (&bodies[bi as usize], &bodies[bj as usize]);
+                                let d = [
+                                    pj.pos[0] - pi.pos[0],
+                                    pj.pos[1] - pi.pos[1],
+                                    pj.pos[2] - pi.pos[2],
+                                ];
+                                let dist2 = d[0] * d[0] + d[1] * d[1] + d[2] * d[2];
+                                let min_d = pi.radius + pj.radius;
+                                // Same test as `contact_delta`, so no live pair is lost.
+                                if dist2 >= min_d * min_d || dist2 < 1e-12 {
+                                    return None;
+                                }
                                 Some(Contact {
                                     i: bi,
                                     j: bj,
-                                    mi: bodies[bi as usize].mass(),
-                                    mj: bodies[bj as usize].mass(),
+                                    mi: pi.mass(),
+                                    mj: pj.mass(),
                                 })
                             })
                     }))
