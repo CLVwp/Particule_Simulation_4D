@@ -20,7 +20,7 @@ fn settled(n: usize) -> World {
 /// Full `step` cost at growing body counts, on the default pool.
 fn bench_step(c: &mut Criterion) {
     let mut group = c.benchmark_group("step");
-    for n in [1000, 4000, 16000] {
+    for n in [1000, 4000, 16000, 30000] {
         group.throughput(Throughput::Elements(n as u64));
         group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, &n| {
             let mut w = settled(n);
@@ -77,7 +77,7 @@ fn spread(n: usize) -> World {
 /// Sparse regime: bodies spread wide, almost no contacts.
 fn bench_spread(c: &mut Criterion) {
     let mut group = c.benchmark_group("spread");
-    for n in [1000, 4000, 16000] {
+    for n in [1000, 4000, 16000, 30000] {
         group.throughput(Throughput::Elements(n as u64));
         group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, &n| {
             let mut w = spread(n);
