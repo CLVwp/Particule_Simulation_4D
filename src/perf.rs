@@ -16,10 +16,15 @@ pub fn allocated_bytes() -> usize {
     LIVE.load(Ordering::Relaxed)
 }
 
-/// Highest value `allocated_bytes` ever reached.
+/// Highest value `allocated_bytes` has reached.
+///
+/// An allocation updates the two counters as two separate atomic steps. This
+/// read combines both counters, so the peak never reads below the live total.
 #[must_use]
 pub fn peak_bytes() -> usize {
-    PEAK.load(Ordering::Relaxed)
+    let peak = PEAK.load(Ordering::Relaxed);
+    let live = LIVE.load(Ordering::Relaxed);
+    peak.max(live)
 }
 
 /// Wraps an allocator and tracks live allocation size.
@@ -64,14 +69,102 @@ static GLOBAL_ALLOC: Counting<System> = Counting(System);
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
+    use std::time::{Duration, Instant};
+
+    /// Blocks this large stand out against other tests that run in parallel.
+    const BIG_BLOCK: usize = 128 * 1024 * 1024;
 
     #[test]
     fn allocation_is_tracked() {
-        // Large enough that parallel test threads cannot mask it.
+        // Allocate. In-use bytes must rise by the block size.
         let before = allocated_bytes();
-        let keep: Vec<u64> = vec![0; 4 * 1024 * 1024]; // 32 MiB
-        assert!(allocated_bytes() >= before + 32 * 1024 * 1024);
+        let keep: Vec<u64> = vec![0; BIG_BLOCK / 8]; // 128 MiB
+        let held = allocated_bytes();
+        assert!(held >= before + BIG_BLOCK, "alloc must raise in-use bytes");
+        // Peak must absorb the new allocation while it is still live.
+        assert!(peak_bytes() >= held, "peak must absorb the live allocation");
+        // Free. In-use bytes must fall back close to the start value.
         drop(keep);
+        let after = allocated_bytes();
+        assert!(
+            after + BIG_BLOCK / 2 <= held,
+            "free must lower in-use bytes"
+        );
+        // Peak never falls. It must stay at or above in-use at every point.
+        assert!(peak_bytes() >= after, "peak must stay at or above in-use");
+    }
+
+    #[test]
+    fn peak_stays_above_in_use_after_big_alloc_then_small_storm() {
+        // Reported pattern: one big block, then a storm of small ones.
+        // Small allocations must never push in-use above the recorded peak.
+        let big: Vec<u8> = vec![0; BIG_BLOCK];
+        assert!(peak_bytes() >= allocated_bytes(), "peak must lead in-use");
+        drop(big);
+
+        let mut smalls: Vec<Vec<u8>> = Vec::with_capacity(1024);
+        for _ in 0..1024 {
+            smalls.push(vec![0u8; 4096]);
+            assert!(
+                peak_bytes() >= allocated_bytes(),
+                "in-use rose above peak during the small storm"
+            );
+        }
+        drop(smalls);
         assert!(peak_bytes() >= allocated_bytes());
+    }
+
+    #[test]
+    fn peak_stays_above_in_use_under_thread_churn() {
+        // Workers churn the heap. The reader samples both counters, like the
+        // overlay does each frame. One sample may skew while workers run.
+        // The next sample must be clean, and the pair must never stay inverted.
+        let stop = Arc::new(AtomicBool::new(false));
+        let mut workers = Vec::new();
+        for _ in 0..4 {
+            let stop = Arc::clone(&stop);
+            workers.push(std::thread::spawn(move || {
+                let mut blocks: Vec<Vec<u8>> = Vec::new();
+                let mut seed = 0x1234_5678_u32;
+                while !stop.load(Ordering::Relaxed) {
+                    // LCG step. `wrapping_*` makes the overflow explicit.
+                    seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                    let size = ((seed >> 16) % 64) as usize * 1024 + 1024;
+                    if blocks.len() >= 64 {
+                        blocks.clear();
+                    }
+                    blocks.push(vec![0u8; size]);
+                }
+            }));
+        }
+
+        // Track the highest in-use sample. Peak must hold this high-water mark.
+        let mut high_water = 0usize;
+        let start = Instant::now();
+        while start.elapsed() < Duration::from_millis(200) {
+            let in_use = allocated_bytes();
+            let peak = peak_bytes();
+            high_water = high_water.max(in_use);
+            if peak < in_use {
+                // One skewed sample is the known read race.
+                assert!(
+                    peak_bytes() >= allocated_bytes(),
+                    "in-use stayed above peak after a skewed sample"
+                );
+            }
+        }
+
+        stop.store(true, Ordering::Relaxed);
+        for worker in workers {
+            worker.join().expect("churn worker must not panic");
+        }
+        // Workers stopped. The pair must sit clean and hold the high-water mark.
+        assert!(peak_bytes() >= allocated_bytes(), "pair inverted at rest");
+        assert!(
+            peak_bytes() >= high_water,
+            "peak lost the churn high-water mark"
+        );
     }
 }
