@@ -57,6 +57,8 @@ fn bench_thread_scaling(c: &mut Criterion) {
 /// wider than two diameters. Sparse regime: full grid scan, few real pairs.
 fn spread(n: usize) -> World {
     let mut w = World::new();
+    // Zero gravity. The cloud must stay spread for the whole bench run.
+    w.settings.gravity = 0.0;
     w.spawn_wave(n, [0.0, 8.0, 0.0], 4.0);
     let per = (n as f64).cbrt().ceil() as usize;
     let spacing = 40.0 / per as f32;

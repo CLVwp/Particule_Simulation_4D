@@ -33,6 +33,7 @@ pub struct Fluid {
 }
 
 impl Fluid {
+    /// Creates a zeroed `n` by `n` fluid grid.
     pub fn new(n: usize) -> Self {
         let size = (n + 2) * (n + 2);
         Fluid {
@@ -66,7 +67,7 @@ impl Fluid {
         let cx = n / 2;
         let half = (n / 16).max(1);
         for j in 1..=3.min(n) {
-            for i in (cx - half)..=(cx + half) {
+            for i in cx.saturating_sub(half)..=(cx + half) {
                 let k = ix(i, j, n);
                 self.dens[k] += self.emit;
                 self.v[k] += 2.0;
@@ -225,6 +226,13 @@ fn set_bnd(b: usize, x: &mut [f32], n: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tiny_grid_steps_without_panic() {
+        // n = 1 puts the emitter range at the array edge.
+        let mut f = Fluid::new(1);
+        f.step(1.0 / 60.0);
+    }
 
     #[test]
     fn emitted_fluid_spreads_and_stays_finite() {
