@@ -1,4 +1,4 @@
-//! Physics core — no GPUI here, testable standalone.
+//! Physics core — no UI code here, testable standalone.
 //!
 //! `step` splits its work over the rayon pool. The pool has one worker per
 //! logical core, detected from the CPU at startup.
@@ -182,6 +182,38 @@ mod tests {
         }
         assert!(lo < -0.9, "never sampled below {lo}");
         assert!(hi > 0.9, "never sampled above {hi}");
+    }
+
+    #[test]
+    fn clear_releases_the_scratch_capacity() {
+        let mut w = World::new();
+        w.spawn_wave(3000, [0.0, 5.0, 0.0], 4.0);
+        w.step(1.0 / 60.0);
+        w.clear();
+        assert_eq!(w.contacts.capacity(), 0, "contacts kept its capacity");
+        assert_eq!(w.bc_items.capacity(), 0, "bc_items kept its capacity");
+        assert_eq!(w.cell_sort.capacity(), 0, "cell_sort kept its capacity");
+    }
+
+    #[test]
+    fn big_spawns_spread_proportionally() {
+        // A 40 000-body spawn must not collapse into one dense cell.
+        let extent = |n: usize| {
+            let mut w = World::new();
+            w.spawn_wave(n, [0.0, 30.0, 0.0], 0.0);
+            let xs = w.bodies.iter().map(|b| b.pos[0]);
+            let (lo, hi) = (
+                xs.clone().fold(f32::MAX, f32::min),
+                xs.fold(f32::MIN, f32::max),
+            );
+            hi - lo
+        };
+        let (small, big) = (extent(100), extent(40_000));
+        // The spread scales as the cube root of the count: ~6.8x here.
+        assert!(
+            big > small * 5.0,
+            "the big spawn stayed dense: {big} vs {small}"
+        );
     }
 
     #[test]

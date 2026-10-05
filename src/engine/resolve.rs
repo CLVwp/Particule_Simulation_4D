@@ -105,6 +105,10 @@ impl World {
         for _ in 0..RESOLVE_ROUNDS {
             // Every slot is rewritten below, so only growth needs a write.
             deltas.resize(contacts.len(), ContactDelta::ZERO);
+            // Reclaim capacity after a spawn transient, with hysteresis.
+            if deltas.capacity() > deltas.len() * 2 + (1 << 16) {
+                deltas.shrink_to_fit();
+            }
             let delta_of = |(d, c): (&mut ContactDelta, &Contact)| {
                 *d = contact_delta(&bodies[c.i as usize], &bodies[c.j as usize], c, rest);
             };

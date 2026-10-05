@@ -91,18 +91,23 @@ impl World {
         self.contacts.len()
     }
 
-    /// Spawns `n` bodies at `origin` with fountain-like velocities.
+    /// Spawns `n` bodies around `origin` with fountain-like velocities. The
+    /// spread grows with `n`, so one big spawn stays a cloud, not a point.
     pub fn spawn(&mut self, n: usize, origin: [f32; 3], speed: f32, shape: Shape, radius: f32) {
         let radius = radius.max(MIN_RADIUS);
         self.cell_size = self.cell_size.max(2.0 * radius);
         self.bodies.reserve(n);
         let mut rng = Rng(0x2545F4914F6CDD1D ^ n as u64);
+        // A dense point makes the first step pair every body with every
+        // neighbor. Spread over a body-proportional volume instead: at 21 %
+        // packing the candidate pairs stay bounded by the neighborhood.
+        let spread = (radius * (n as f32 / 0.4).cbrt()).max(0.2);
         for _ in 0..n {
             self.bodies.push(Body {
                 pos: [
-                    origin[0] + rng.next_f32() * 0.2,
-                    origin[1] + rng.next_f32() * 0.2,
-                    origin[2] + rng.next_f32() * 0.2,
+                    origin[0] + rng.next_f32() * spread,
+                    origin[1] + rng.next_f32() * spread,
+                    origin[2] + rng.next_f32() * spread,
                 ],
                 vel: [
                     rng.next_f32() * speed * 0.4,
@@ -120,10 +125,24 @@ impl World {
         self.spawn(n, origin, speed, Shape::Sphere, BODY_RADIUS);
     }
 
-    /// Removes every body and resets the grid to its base size.
+    /// Removes every body, resets the grid, and frees the scratch buffers.
+    /// A big spawn transient leaves gigabytes of retained capacity behind;
+    /// `clear` is the explicit boundary where that memory must go back.
     pub fn clear(&mut self) {
+        fn free<T>(buffer: &mut Vec<T>) {
+            buffer.clear();
+            buffer.shrink_to_fit();
+        }
         self.bodies.clear();
         self.cell_size = 2.0 * BODY_RADIUS;
+        free(&mut self.contacts);
+        free(&mut self.deltas);
+        free(&mut self.cell_sort);
+        free(&mut self.cell_keys);
+        free(&mut self.cell_start);
+        free(&mut self.bc_start);
+        free(&mut self.bc_cursor);
+        free(&mut self.bc_items);
     }
 
     /// Advances the world by `dt` seconds.

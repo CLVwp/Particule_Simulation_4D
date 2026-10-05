@@ -132,5 +132,11 @@ impl World {
             bc_items[bc_cursor[c.j as usize] as usize] = ci | J_SIDE;
             bc_cursor[c.j as usize] += 1;
         }
+        // Reclaim capacity after a spawn transient. The hysteresis keeps the
+        // steady state from shrinking and re-growing every step.
+        if contacts.capacity() > contacts.len() * 2 + (1 << 16) {
+            contacts.shrink_to_fit();
+            bc_items.shrink_to_fit();
+        }
     }
 }
