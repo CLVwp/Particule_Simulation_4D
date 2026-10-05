@@ -139,6 +139,11 @@ pub struct World {
     deltas: Vec<ContactDelta>,
     /// Cell key + body index, sorted by key. Replaces the hash grid.
     cell_sort: Vec<(u64, u32)>,
+    /// Unique cell keys of `cell_sort`, ascending. Runs of equal key.
+    cell_keys: Vec<u64>,
+    /// Start offset of each key's run in `cell_sort`, plus the end. One entry
+    /// per key, last entry is `cell_sort.len()`.
+    cell_start: Vec<u32>,
     /// Per-body contact index as flat arrays: offsets into `bc_items`.
     bc_start: Vec<u32>,
     /// Fill cursor for `bc_items`, kept across steps to avoid reallocation.
@@ -159,6 +164,8 @@ impl Default for World {
             contacts: Vec::new(),
             deltas: Vec::new(),
             cell_sort: Vec::new(),
+            cell_keys: Vec::new(),
+            cell_start: Vec::new(),
             bc_start: Vec::new(),
             bc_cursor: Vec::new(),
             bc_items: Vec::new(),
@@ -238,12 +245,14 @@ impl World {
         });
     }
 
-    /// Packs every body's cell into a key and sorts the pairs. One cell holds
-    /// one body diameter. Neighbor cells become binary searches, so there is
-    /// no map to clear and no allocation.
+    /// Packs every body's cell into a key, sorts the pairs, and records the
+    /// runs. One cell holds one body diameter. Neighbor cells become binary
+    /// searches over the unique keys, so there is no map and no allocation.
     fn sort_cells(&mut self) {
         let World {
             cell_sort,
+            cell_keys,
+            cell_start,
             bodies,
             cell_size,
             ..
@@ -262,11 +271,29 @@ impl World {
             cell_sort.par_iter_mut().enumerate().for_each(fill);
             cell_sort.par_sort_unstable();
         }
+        // Runs of equal key. ponytail: O(n) sequential; hide it if it ever shows
+        cell_keys.clear();
+        cell_start.clear();
+        cell_start.push(0);
+        for (pos, &(k, _)) in cell_sort.iter().enumerate() {
+            if cell_keys.last() != Some(&k) {
+                cell_keys.push(k);
+                // The leading 0 already covers the first key's start.
+                if pos > 0 {
+                    cell_start.push(pos as u32);
+                }
+            }
+        }
+        cell_start.push(cell_sort.len() as u32);
     }
 
-    /// Finds candidate pairs: body `i` binary-searches its 27 neighbor cells
-    /// in the sorted array and keeps `j > i`. Runs on the pool; everything it
-    /// touches is read-only.
+    /// Finds candidate pairs cell by cell. Each cell binary-searches its
+    /// stencil neighbors in the unique keys, then emits body pairs.
+    ///
+    /// The stencil holds self plus the 13 lex-positive offsets of the 27-cell
+    /// neighborhood. Every pair of cells within reach meets in exactly one
+    /// stencil direction, so cross-cell pairs need no filter. Same-cell pairs
+    /// keep `j > i`.
     ///
     /// The per-body index fill stays sequential on purpose: each body's list
     /// must keep contact order, or the Jacobi sum stops being deterministic.
@@ -274,48 +301,61 @@ impl World {
     fn build_contacts(&mut self) {
         let World {
             cell_sort,
+            cell_keys,
+            cell_start,
             bodies,
             contacts,
             bc_start,
             bc_cursor,
             bc_items,
-            cell_size,
             ..
         } = self;
         let cell_sort = &*cell_sort;
+        let cell_keys = &*cell_keys;
+        let cell_start = &*cell_start;
         let bodies = &*bodies;
-        let cs = *cell_size;
-        let scan = move |i: u32| {
-            let [cx, cy, cz] = cell_of(bodies[i as usize].pos, cs);
-            let mi = bodies[i as usize].mass();
-            (-1i64..=1)
-                .flat_map(move |dx| {
-                    (-1i64..=1).flat_map(move |dy| {
-                        (-1i64..=1).map(move |dz| {
-                            pack_cell(cx as i64 + dx, cy as i64 + dy, cz as i64 + dz)
-                        })
-                    })
+        let n_cells = cell_keys.len();
+        let cell_scan = move |c: u32| {
+            let c = c as usize;
+            let [cx, cy, cz] = key_cell(cell_keys[c]);
+            let own_lo = cell_start[c] as usize;
+            let own_hi = cell_start[c + 1] as usize;
+            STENCIL
+                .iter()
+                .filter_map(move |&(dx, dy, dz)| {
+                    let key = pack_cell(cx as i64 + dx, cy as i64 + dy, cz as i64 + dz);
+                    let lo = cell_keys.partition_point(|&k| k < key);
+                    if lo >= n_cells || cell_keys[lo] != key {
+                        return None;
+                    }
+                    let from = cell_start[lo] as usize;
+                    let to = cell_start[lo + 1] as usize;
+                    // The found run is the own cell only for (0, 0, 0).
+                    let same = lo == c;
+                    Some(cell_sort[from..to].iter().flat_map(move |&(_, bj)| {
+                        cell_sort[own_lo..own_hi]
+                            .iter()
+                            .filter_map(move |&(_, bi)| {
+                                if same && bi >= bj {
+                                    return None;
+                                }
+                                Some(Contact {
+                                    i: bi,
+                                    j: bj,
+                                    mi: bodies[bi as usize].mass(),
+                                    mj: bodies[bj as usize].mass(),
+                                })
+                            })
+                    }))
                 })
-                .map(move |key| {
-                    let lo = cell_sort.partition_point(|&(k, _)| k < key);
-                    let hi = cell_sort.partition_point(|&(k, _)| k <= key);
-                    &cell_sort[lo..hi]
-                })
-                .flat_map(|run| run.iter())
-                .filter(move |&&(_, j)| j > i)
-                .map(move |&(_, j)| Contact {
-                    i,
-                    j,
-                    mi,
-                    mj: bodies[j as usize].mass(),
-                })
+                .flatten()
         };
-        *contacts = if bodies.len() < PAR_MIN {
-            (0..bodies.len() as u32).flat_map(scan).collect()
+        *contacts = if n_cells < PAR_MIN {
+            (0..n_cells as u32).flat_map(cell_scan).collect()
         } else {
-            (0..bodies.len() as u32)
+            (0..n_cells as u32)
                 .into_par_iter()
-                .flat_map_iter(scan)
+                .flat_map_iter(cell_scan)
                 .collect()
         };
 
@@ -510,6 +550,35 @@ fn cell_key(p: [f32; 3], cell_size: f32) -> u64 {
 fn pack_cell(x: i64, y: i64, z: i64) -> u64 {
     key_part(x) << 42 | key_part(y) << 21 | key_part(z)
 }
+
+/// The 21-bit fields back into cell coordinates.
+fn key_cell(key: u64) -> [i32; 3] {
+    let mask = (KEY_SPAN - 1) as u64;
+    [
+        ((key >> 42) as i64 - KEY_OFF) as i32,
+        ((key >> 21 & mask) as i64 - KEY_OFF) as i32,
+        ((key & mask) as i64 - KEY_OFF) as i32,
+    ]
+}
+
+/// Self plus the 13 lex-positive offsets of the 27-cell neighborhood.
+/// For every nonzero cell delta, exactly one of `d` and `-d` is in this list.
+const STENCIL: [(i64, i64, i64); 14] = [
+    (0, 0, 0),
+    (0, 0, 1),
+    (0, 1, -1),
+    (0, 1, 0),
+    (0, 1, 1),
+    (1, -1, -1),
+    (1, -1, 0),
+    (1, -1, 1),
+    (1, 0, -1),
+    (1, 0, 0),
+    (1, 0, 1),
+    (1, 1, -1),
+    (1, 1, 0),
+    (1, 1, 1),
+];
 
 #[cfg(test)]
 mod tests {

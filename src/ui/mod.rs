@@ -483,6 +483,10 @@ impl SimView {
         let dist = self.dist;
 
         // Project everything up-front; the paint closure only draws.
+        // The projection divides by the camera depth, so anything at or behind
+        // the camera (depth <= NEAR) projects to garbage. Cull it, or it shows
+        // up as mirrored "ghost" shapes.
+        const NEAR: f32 = 0.5;
         let scene = Instant::now();
         // Newton: (x, y, radius_px, depth, shape) per body.
         // Fluid: (x, y, radius_px, density, depth) per lit cell.
@@ -494,9 +498,13 @@ impl SimView {
                 };
                 let bodies = &self.world.bodies;
                 let mut points: Vec<ProjectedBody> = if bodies.len() >= PAR_MIN {
-                    bodies.par_iter().map(project).collect()
+                    bodies
+                        .par_iter()
+                        .map(project)
+                        .filter(|p| p.3 > NEAR)
+                        .collect()
                 } else {
-                    bodies.iter().map(project).collect()
+                    bodies.iter().map(project).filter(|p| p.3 > NEAR).collect()
                 };
                 // painter's algorithm: far first
                 if points.len() >= PAR_MIN {
@@ -518,6 +526,9 @@ impl SimView {
                         let xw = FLUID_LEFT + (i as f32 - 0.5) * cell;
                         let yw = (j as f32 - 0.5) * cell;
                         let (x, y, focal, z) = self.project([xw, yw, 0.0], w, h);
+                        if z <= NEAR {
+                            continue;
+                        }
                         let rad = (cell * focal / z * 0.5).max(1.0);
                         quads.push((x, y, rad, d, z));
                     }
@@ -529,7 +540,8 @@ impl SimView {
         self.scene_ms = self.scene_ms * 0.9 + ms * 0.1;
         let quads_drawn = points.len() + fluid_quads.len();
 
-        // Floor grid.
+        // Floor grid. A segment with one end behind the camera warps too, so
+        // the whole segment goes.
         let span = (GRID_HALF * GRID_STEP) as f32;
         let mut grid: Vec<([f32; 3], [f32; 3])> = Vec::with_capacity(42);
         for gi in -GRID_HALF..=GRID_HALF {
@@ -540,6 +552,7 @@ impl SimView {
         let grid = grid
             .into_iter()
             .map(|(a, b)| (self.project(a, w, h), self.project(b, w, h)))
+            .filter(|(a, b)| a.3 > NEAR && b.3 > NEAR)
             .collect::<Vec<_>>();
 
         // Orthonormal frame: one colored arm per axis, plus a text label at each tip.
@@ -553,8 +566,10 @@ impl SimView {
         for (tip, color, label) in AXES {
             let a = self.project([0.0, 0.0, 0.0], w, h);
             let b = self.project(tip, w, h);
-            axis_lines.push((a, b, color));
-            axis_labels.push((b.0, b.1, color, label));
+            if a.3 > NEAR && b.3 > NEAR {
+                axis_lines.push((a, b, color));
+                axis_labels.push((b.0, b.1, color, label));
+            }
         }
 
         let (fwd, back, left, right) = (
