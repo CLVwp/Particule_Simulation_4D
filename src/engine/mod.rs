@@ -249,6 +249,9 @@ impl World {
         for (i, b) in bodies.iter().enumerate() {
             grid.entry(cell_of(b.pos, cs)).or_default().push(i as u32);
         }
+        // Drops cells no body occupies any more. Without this, the map keeps
+        // every cell ever visited and the clear pass grows without bound.
+        grid.retain(|_, cell| !cell.is_empty());
     }
 
     /// Finds candidate pairs: body `i` scans its 27 neighbor cells and keeps `j > i`.
@@ -565,5 +568,19 @@ mod tests {
             }
         }
         assert!(bounced, "big bodies never bounced off each other");
+    }
+
+    #[test]
+    fn grid_drops_cells_bodies_left() {
+        let mut w = World::new();
+        w.spawn_wave(2, [0.0, 3.0, 0.0], 0.0);
+        w.bodies[0].pos = [-50.0, 3.0, -50.0];
+        w.bodies[1].pos = [50.0, 3.0, 50.0];
+        for _ in 0..10 {
+            w.step(1.0 / 60.0);
+        }
+        // Two live bodies, so the map may hold a handful of cells, no more.
+        // Before the retain fix this read in the thousands after spreading.
+        assert!(w.grid.len() <= 4, "grid kept {} dead cells", w.grid.len());
     }
 }
