@@ -47,6 +47,15 @@ pub(crate) enum PhysicsMode {
     Fluid,
 }
 
+/// How the spawn panel builds its bodies.
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) enum SpawnLayout {
+    /// Random cloud with launch speeds. Honors the seed field.
+    Fountain,
+    /// Velocity-free lattice cube. Side cubed bodies, no randomness.
+    Lattice,
+}
+
 /// One app instance. The state is 1:1 with the old `SimView` state.
 pub(crate) struct App {
     /// Active page.
@@ -67,6 +76,10 @@ pub(crate) struct App {
     pub(crate) spawn_radius: f32,
     /// Spawn panel: launch speed.
     pub(crate) spawn_speed: f32,
+    /// Spawn panel: cloud or lattice build.
+    pub(crate) spawn_layout: SpawnLayout,
+    /// Spawn panel: explicit fountain seed. Zero keeps the auto stream.
+    pub(crate) spawn_seed: u64,
     /// True while the step is held. Space toggles it.
     pub(crate) paused: bool,
     /// Multiplier on the fixed step. 0.1 crawls, 4.0 races.
@@ -110,6 +123,8 @@ impl App {
             spawn_count: 1000,
             spawn_radius: BODY_RADIUS,
             spawn_speed: SPAWN_SPEED,
+            spawn_layout: SpawnLayout::Fountain,
+            spawn_seed: 0,
             paused: false,
             time_scale: 1.0,
             cam: Camera::default(),
@@ -159,10 +174,42 @@ impl App {
     }
 
     /// Spawns `n` bodies with the panel parameters. Clamps the radius to the
-    /// engine floor.
+    /// engine floor. The lattice maps the count to a cube side.
     pub(crate) fn spawn_from_panel(&mut self, n: usize) {
         let radius = self.spawn_radius.max(MIN_RADIUS);
-        self.world
-            .spawn(n, SPAWN_ORIGIN, self.spawn_speed, self.spawn_shape, radius);
+        match self.spawn_layout {
+            SpawnLayout::Fountain => {
+                // Seed zero keeps the auto stream, which derives from the
+                // count alone. Any other value replays the same cloud.
+                if self.spawn_seed == 0 {
+                    self.world.spawn(
+                        n,
+                        SPAWN_ORIGIN,
+                        self.spawn_speed,
+                        self.spawn_shape,
+                        radius,
+                    );
+                } else {
+                    self.world.spawn_seeded(
+                        n,
+                        SPAWN_ORIGIN,
+                        self.spawn_speed,
+                        self.spawn_shape,
+                        radius,
+                        self.spawn_seed,
+                    );
+                }
+            }
+            SpawnLayout::Lattice => {
+                let side = ((n as f32).cbrt().round() as usize).max(1);
+                self.world.spawn_grid(
+                    side,
+                    SPAWN_ORIGIN,
+                    2.0 * radius,
+                    self.spawn_shape,
+                    radius,
+                );
+            }
+        }
     }
 }
