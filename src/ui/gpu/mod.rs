@@ -10,10 +10,13 @@ use crate::ui::camera::Camera;
 use crate::ui::scene::{BODY_LIGHT, BODY_SAT, CUBE_HUE, NEAR, SPHERE_HUE};
 use crate::ui::theme::hsla_to_rgba;
 
+#[cfg(test)]
+mod physics;
+
 /// One body in the GPU storage buffer. Exactly 32 bytes. Flat arrays: a
 /// `vec3` would force align 16 and grow the stride to 48 bytes.
 #[repr(C)]
-#[derive(Clone, Copy, Pod, Zeroable)]
+#[derive(Clone, Copy, Debug, PartialEq, Pod, Zeroable)]
 pub(crate) struct GpuBody {
     /// Position in world units, as x, y, z.
     pub(crate) pos: [f32; 3],
