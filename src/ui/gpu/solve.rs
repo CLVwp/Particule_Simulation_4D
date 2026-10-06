@@ -360,7 +360,7 @@ mod tests {
         // pair indices must ascend, and both sides must appear once.
         let (starts, items) = state.download_csr(&device, &queue, count);
         let (_, pairs) = state.download_pairs(&device, &queue, count, sim.pair_cap);
-        let total = starts[count as usize] as usize;
+        let total = starts[count] as usize;
         assert_eq!(total, pairs.len() * 2, "item count is not two per pair");
         for b in 0..count {
             let slice = &items[starts[b] as usize..starts[b + 1] as usize];
