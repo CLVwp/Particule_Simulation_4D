@@ -7,7 +7,12 @@ use crate::engine::config::FLOOR_Y;
 
 impl World {
     /// Advances the world by `dt` seconds.
+    ///
+    /// # Panics
+    /// Debug builds panic when `dt` is zero, negative, or not finite. A
+    /// bad `dt` poisons every position, so the guard fires at the call.
     pub fn step(&mut self, dt: f32) {
+        debug_assert!(dt.is_finite() && dt > 0.0, "dt must be finite and above zero");
         let t = Instant::now();
         self.integrate(dt);
         self.phase_ms[0] = super::ms_since(t);
