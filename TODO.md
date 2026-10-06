@@ -5,12 +5,14 @@ contacts 24.22 ms, resolve 3.91 ms, grid 3.36 ms. Order the work by
 phase weight: contacts first.
 
 After the 2026-10-06 wave (settled pile, `cargo run --release
---example phase_table 500000`, median of three runs): step 15.59 ms.
-contacts 10.02 ms, grid 2.81 ms, resolve 2.61 ms. Resolve paid
-0.45 ms for the pair-friction delta: `ContactDelta` grew 20 to 36
-bytes to carry the tangent. The phase table example reproduces the
-F1 table headless, settles 60 frames like the benches. Use it before
-and after every change.
+--example phase_table 500000`): the example settles 60 frames like
+the benches, so the pile is tighter than the old 30-frame numbers
+and contacts read 865 369. Median step 19.5 ms. contacts 12.0 ms,
+grid 3.1 ms, resolve 4.0 ms, scene 7.5 ms. Resolve paid about
+0.5 ms for the pair-friction delta: `ContactDelta` grew 20 to 36
+bytes to carry the tangent. The example prints the scene line now;
+the step loop runs alone, the scene loop follows. Use it before and
+after every change.
 
 In-app F1 at 500k, sparse scene (19 893 contacts): frame 19.0 ms,
 step 7.747 ms. contacts 3.967 ms, grid 3.127 ms, resolve 0.683 ms.

@@ -1,13 +1,16 @@
-//! Benchmarks for the physics engine. Run with `cargo bench`.
+//! Benchmarks for the physics engine and the scene build. Run with `cargo bench`.
 //!
 //! The `step`, `spread`, and `thread_scaling` groups spawn spheres only.
 //! The `step_shape` group adds cube and half-and-half piles. Physics
 //! reads no shape tag, so the three shape rows must match at each scale.
+//! The `scene` group measures the CPU scene build that the GPU vertex-pull
+//! path replaces.
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use std::hint::black_box;
 
 use particule_simulation_4d::engine::{Shape, World, thread_count};
+use particule_simulation_4d::ui::{Camera, SceneOut, TileCache, Tuning, emit_scene_cpu};
 
 const DT: f32 = 1.0 / 60.0;
 
@@ -154,11 +157,46 @@ fn bench_step_shape(c: &mut Criterion) {
     group.finish();
 }
 
+/// CPU scene build at the four reference scales, on a settled pile. One
+/// fixed 1080p frame keeps the projection constant across scales. This is
+/// the phase the GPU vertex-pull path replaces, so this group is the
+/// baseline for that swap.
+fn bench_scene(c: &mut Criterion) {
+    let mut group = c.benchmark_group("scene");
+    for n in [10_000, 100_000, 500_000, 1_000_000] {
+        group.throughput(Throughput::Elements(n as u64));
+        group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, &n| {
+            let w = settled(n);
+            let cam = Camera::default();
+            let tuning = Tuning::default();
+            let mut tiles = TileCache::default();
+            let mut out = SceneOut::default();
+            let (w_px, h_px) = (1920.0, 1080.0);
+            b.iter(|| {
+                emit_scene_cpu(
+                    &cam,
+                    &w.bodies,
+                    w_px,
+                    h_px,
+                    cam.dist,
+                    &tuning,
+                    w.settings.par_min,
+                    &mut tiles,
+                    &mut out,
+                );
+                black_box(out.instances.len());
+            });
+        });
+    }
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_step,
     bench_spread,
     bench_thread_scaling,
-    bench_step_shape
+    bench_step_shape,
+    bench_scene
 );
 criterion_main!(benches);

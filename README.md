@@ -106,6 +106,7 @@ cargo bench --bench engine -- step_shape
 | `spread` | full step on sparse scenes, almost no contacts |
 | `thread_scaling` | step cost at 1, half, and all detected threads |
 | `step_shape` | sphere, cube, and half-and-half piles at 10k, 100k, 500k, 1M |
+| `scene` | the CPU scene build at the same four scales |
 
 The engine never reads the shape tag. The three `step_shape` rows of one
 scale must stay equal. A gap means the physics grew shape-dependent.
