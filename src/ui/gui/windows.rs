@@ -81,6 +81,27 @@ pub(crate) fn physics_window(ctx: &Context, app: &mut App, below: f32) {
                         0.0..=1.0,
                         0.05,
                     );
+                    grid_slider(
+                        ui,
+                        "Pair bounce",
+                        &mut app.world.settings.pair_restitution,
+                        0.0..=1.0,
+                        0.05,
+                    );
+                    grid_slider(
+                        ui,
+                        "Pair friction",
+                        &mut app.world.settings.pair_friction,
+                        0.0..=1.0,
+                        0.05,
+                    );
+                    grid_slider(
+                        ui,
+                        "Speed cap",
+                        &mut app.world.settings.max_speed,
+                        0.0..=100.0,
+                        5.0,
+                    );
                 }
                 PhysicsMode::Fluid => {
                     rate_drag(ui, &mut app.fluid.viscosity);
