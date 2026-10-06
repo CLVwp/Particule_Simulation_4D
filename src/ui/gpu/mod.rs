@@ -4,7 +4,7 @@ use std::mem::size_of;
 
 use bytemuck::{Pod, Zeroable};
 
-use particule_simulation_4d::engine::{Body, Shape};
+use crate::engine::{Body, Shape};
 
 use crate::ui::camera::Camera;
 use crate::ui::scene::{BODY_LIGHT, BODY_SAT, CUBE_HUE, NEAR, SPHERE_HUE};

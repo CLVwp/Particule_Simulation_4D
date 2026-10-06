@@ -2,7 +2,7 @@
 
 use egui::{Align2, Area, Button, Color32, Context, FontId, Id, LayerId, Vec2, pos2};
 
-use particule_simulation_4d::engine::thread_count;
+use crate::engine::thread_count;
 
 use crate::ui::input::MoveAction;
 use crate::ui::scene::SceneOut;

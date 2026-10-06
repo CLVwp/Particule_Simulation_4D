@@ -1,8 +1,7 @@
 //! Starts the particle simulation window.
 
-mod ui;
-
 use particule_simulation_4d::engine;
+use particule_simulation_4d::ui;
 
 fn main() {
     // One worker per logical core, detected from the CPU.
@@ -13,5 +12,5 @@ fn main() {
 
     env_logger::init();
 
-    ui::app::run();
+    ui::run();
 }

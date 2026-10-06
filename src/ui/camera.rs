@@ -2,15 +2,15 @@
 
 /// Orbit camera. Looks at `target` from `dist` along the rotated +z axis.
 #[derive(Clone, Copy)]
-pub(crate) struct Camera {
+pub struct Camera {
     /// Look-at point, in world units.
-    pub(crate) target: [f32; 3],
+    pub target: [f32; 3],
     /// Horizontal angle, in radians.
-    pub(crate) yaw: f32,
+    pub yaw: f32,
     /// Vertical angle, in radians. Clamped to -1.4..=1.4.
-    pub(crate) pitch: f32,
+    pub pitch: f32,
     /// Distance from the target, in world units.
-    pub(crate) dist: f32,
+    pub dist: f32,
 }
 
 impl Default for Camera {

@@ -1,6 +1,6 @@
 //! Fluid instances. Projects one quad per lit fluid cell.
 
-use particule_simulation_4d::engine::fluid::Fluid;
+use crate::engine::fluid::Fluid;
 
 use super::{Instance, NEAR, SceneOut};
 use crate::ui::camera::Camera;

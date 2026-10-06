@@ -4,7 +4,7 @@ use std::mem::size_of;
 use std::num::NonZeroU64;
 
 use bytemuck::{Pod, Zeroable};
-use particule_simulation_4d::engine::Body;
+use crate::engine::Body;
 
 use crate::ui::gpu::{CamUniforms, GpuBody};
 use crate::ui::scene::{Instance, LineVert};
@@ -522,7 +522,7 @@ mod tests {
     use super::*;
     use crate::ui::camera::Camera;
     use crate::ui::scene::Instance;
-    use particule_simulation_4d::engine::Shape;
+    use crate::engine::Shape;
 
     /// Builds one offscreen device. Returns `None` without an adapter.
     fn headless_device() -> Option<(wgpu::Device, wgpu::Queue)> {

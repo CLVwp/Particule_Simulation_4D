@@ -2,7 +2,7 @@
 
 use egui::{Context, DragValue, Grid, Vec2};
 
-use particule_simulation_4d::engine::Shape;
+use crate::engine::Shape;
 
 use crate::ui::widgets::{enum_toggle, faint, grid_slider, rate_drag, side_window};
 use crate::ui::{App, PhysicsMode, SpawnLayout};

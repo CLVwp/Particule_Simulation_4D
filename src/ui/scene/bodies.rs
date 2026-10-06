@@ -1,6 +1,6 @@
 //! Body instances. Projects Newton bodies and merges small dots into tiles.
 
-use particule_simulation_4d::engine::{Body, Shape};
+use crate::engine::{Body, Shape};
 use rayon::prelude::*;
 
 use super::{Instance, NEAR, SceneOut, TileCache, TileMerge, Tuning};

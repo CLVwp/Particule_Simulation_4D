@@ -1,4 +1,8 @@
 //! App state: pages, physics modes, the spawn panel, and the frame step.
+//!
+//! Two items stay public for benches, examples, and the binary: [`run`]
+//! starts the window, and [`emit_scene_cpu`] builds one frame's scene
+//! headless. Everything else is crate-private.
 
 pub(crate) mod app;
 pub(crate) mod camera;
@@ -12,13 +16,42 @@ pub(crate) mod widgets;
 
 use std::time::Instant;
 
-use particule_simulation_4d::engine::fluid::Fluid;
-use particule_simulation_4d::engine::{BODY_RADIUS, MIN_RADIUS, Shape, World};
+use crate::engine::fluid::Fluid;
+use crate::engine::{BODY_RADIUS, MIN_RADIUS, Shape, World};
 
-use crate::ui::camera::Camera;
 use crate::ui::input::{InputState, apply_moves};
-use crate::ui::scene::{TileCache, Tuning};
 use crate::ui::theme::{SMOOTH_KEEP, SMOOTH_NEW};
+
+pub use crate::ui::camera::Camera;
+pub use crate::ui::scene::{SceneOut, TileCache, Tuning};
+
+/// Starts the particle simulation window.
+pub fn run() {
+    app::run();
+}
+
+/// Builds one frame's scene headless: the CPU instance path plus the grid
+/// and axes. This is the phase the GPU vertex-pull path replaces, so the
+/// benches and the phase table example measure it as their baseline.
+/// The GPU path needs a device and has no headless form.
+#[allow(clippy::too_many_arguments)]
+pub fn emit_scene_cpu(
+    cam: &Camera,
+    bodies: &[crate::engine::Body],
+    w: f32,
+    h: f32,
+    dist: f32,
+    tuning: &Tuning,
+    par_min: usize,
+    tiles: &mut TileCache,
+    out: &mut SceneOut,
+) {
+    out.instances.clear();
+    out.lines.clear();
+    out.axis_labels.clear();
+    scene::emit_bodies(cam, bodies, w, h, dist, tuning, par_min, tiles, out);
+    scene::emit_lines(cam, w, h, out);
+}
 
 /// Fixed physics step. One step runs per rendered frame.
 pub(crate) const FIXED_DT: f32 = 1.0 / 60.0;

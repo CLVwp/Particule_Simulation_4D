@@ -12,12 +12,13 @@ mod bodies;
 mod fluid;
 mod lines;
 
-use self::bodies::{MERGE_RADIUS_PX, MERGE_TILE_FILL, MERGE_TILE_PX, emit_bodies};
+use self::bodies::{MERGE_RADIUS_PX, MERGE_TILE_FILL, MERGE_TILE_PX};
+pub(crate) use self::bodies::emit_bodies;
 
 /// Body colors shared with the GPU vertex-pull path.
 pub(crate) use self::bodies::{BODY_LIGHT, BODY_SAT, CUBE_HUE, SPHERE_HUE};
 use self::fluid::emit_fluid;
-use self::lines::emit_lines;
+pub(crate) use self::lines::emit_lines;
 
 /// Depths at or below this sit at or behind the camera.
 pub(crate) const NEAR: f32 = 0.5;
@@ -28,7 +29,7 @@ pub(crate) const DENSITY_CUTOFF: f32 = 0.02;
 /// would force align 16 and pad the vertex stride to 48 bytes.
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
-pub(crate) struct Instance {
+pub struct Instance {
     /// Center x, in physical pixels.
     pub(crate) x: f32,
     /// Center y, in physical pixels.
@@ -48,7 +49,7 @@ const _: () = assert!(size_of::<Instance>() == 32);
 /// triangles, with the corner offsets computed on the CPU.
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
-pub(crate) struct LineVert {
+pub struct LineVert {
     /// Position x, in physical pixels.
     pub(crate) x: f32,
     /// Position y, in physical pixels.
@@ -63,13 +64,13 @@ const _: () = assert!(size_of::<LineVert>() == 24);
 /// Scene output. The renderer uploads these vectors once per frame.
 /// All fields reset each build. Both vectors stay allocated between frames.
 #[derive(Default)]
-pub(crate) struct SceneOut {
+pub struct SceneOut {
     /// One quad per drawn body or fluid cell.
-    pub(crate) instances: Vec<Instance>,
+    pub instances: Vec<Instance>,
     /// Six vertices per drawn grid or axis segment.
-    pub(crate) lines: Vec<LineVert>,
+    pub lines: Vec<LineVert>,
     /// One entry per visible axis tip: screen x, y, color, text.
-    pub(crate) axis_labels: Vec<(f32, f32, [f32; 4], &'static str)>,
+    pub axis_labels: Vec<(f32, f32, [f32; 4], &'static str)>,
 }
 
 /// Sums one merge tile. Each field totals every member of the tile.
@@ -90,7 +91,7 @@ const _: () = assert!(size_of::<TileMerge>() == 20);
 /// Reused tile merge bins across frames.
 // ponytail: per-tile depth flattening; per-tile depth sort is the upgrade path
 #[derive(Default)]
-pub(crate) struct TileCache {
+pub struct TileCache {
     /// One sum set per tile. Each build resets only its used slots.
     pub(crate) bins: Vec<TileMerge>,
     /// Indexes of the tiles the last build used.
@@ -100,7 +101,7 @@ pub(crate) struct TileCache {
 /// Live tuning for the render-side optimizations. `Default` matches the
 /// constants above. The F1 panel edits these at runtime.
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct Tuning {
+pub struct Tuning {
     /// Merge small dots into screen tiles.
     pub(crate) lod_merge: bool,
     /// Bodies below this screen radius merge into tiles.

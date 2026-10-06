@@ -4,8 +4,8 @@ use std::mem::size_of;
 
 use egui::{Align2, Area, Color32, Context, Frame, Id, Ui, Vec2};
 
-use particule_simulation_4d::engine::{Body, SimSettings, thread_count};
-use particule_simulation_4d::perf::{allocated_bytes, peak_bytes};
+use crate::engine::{Body, SimSettings, thread_count};
+use crate::perf::{allocated_bytes, peak_bytes};
 
 use crate::ui::scene::{SceneOut, Tuning};
 use crate::ui::widgets::{head, line, slider_row};
