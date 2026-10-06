@@ -118,18 +118,12 @@ Read this section before the first change of a new session.
 - [ ] `[arch]` **mimalloc.** Swap the global allocator. Small wins on
   allocation-heavy frames. Effort: trivial.
 
-## CI — for a dedicated session
+## CI — solved 2026-10-06
 
-`checks` is green since the wgpu migration. `miri` failed for three
-known causes:
-
-1. gpui era: `yeslogic-fontconfig-sys` failed on Linux. The migration
-   removed the dependency. Solved.
-2. Network: the nightly cache expires daily. Downloads hit broken
-   pipes. Drafted fix: `CARGO_NET_RETRY: "10"`.
-3. Miri: `crossbeam-epoch` trips a Stacked Borrows false positive in
-   the rayon pool (`internal.rs:567`). Known upstream issue. Not a
-   bug here. Drafted fix: `MIRIFLAGS: -Zmiri-tree-borrows`.
-
-The two fixes sit uncommitted in `.github/workflows/ci.yml`. Verify
-them, then commit.
+`checks` runs on Linux and Windows msvc. The miri fixes are committed:
+`CARGO_NET_RETRY` for the nightly cache, and `MIRIFLAGS` with Tree
+Borrows for the `crossbeam-epoch` false positive. The job now also
+sets `timeout-minutes` and a `concurrency` group, so a stale run
+cannot stack for six hours. The multi-hundred-step test loops carry
+`#[cfg_attr(miri, ignore)]`. One parallel step still runs under miri,
+so the pool and the atomic fill stay checked.

@@ -60,6 +60,9 @@ mod tests {
     use crate::engine::config::{BODY_RADIUS, FLOOR_Y};
 
     #[test]
+    // ponytail: miri runs these 600-step loops thousands of times slower.
+    // `cargo test` still runs them on every machine. Revisit when miri gets faster.
+    #[cfg_attr(miri, ignore)]
     fn falls_and_bounces_never_below_floor() {
         let mut w = World::new();
         w.spawn_wave(1, [0.0, 5.0, 0.0], 0.0);
@@ -78,6 +81,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn head_on_collision_pushes_bodies_apart() {
         let mut w = World::new();
         // Mid-air meeting point: floor friction never touches the test.
@@ -110,6 +114,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn result_does_not_depend_on_thread_count() {
         // 3000 bodies sit above PAR_MIN, so the pooled run takes the parallel path.
         let mut solo = World::new();
@@ -154,6 +159,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn custom_size_and_shape_bodies_collide() {
         let mut w = World::new();
         w.spawn(2, [0.0, 2.0, 0.0], 0.0, Shape::Cube, 0.5);

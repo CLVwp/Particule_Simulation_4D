@@ -135,6 +135,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn peak_stays_above_in_use_under_thread_churn() {
         // Workers churn the heap. The reader samples both counters, like the
         // overlay does each frame. One sample may skew while workers run.

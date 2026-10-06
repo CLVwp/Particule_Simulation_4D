@@ -6,6 +6,11 @@ on:
     branches: [main]
   pull_request:
 
+# One run per branch. A new push cancels the stale run.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   # The nightly cache expires daily. Full re-downloads hit broken pipes on
   # the runner; the default of 3 tries is too few.
@@ -13,7 +18,12 @@ env:
 
 jobs:
   checks:
-    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        # Windows msvc is the primary target. Linux stays the second leg.
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -24,6 +34,7 @@ jobs:
 
   miri:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     env:
       # Stacked Borrows reports a false positive in crossbeam-epoch, which
       # rayon pulls in. Tree Borrows is the supported model for that code.
@@ -35,5 +46,7 @@ jobs:
           components: miri
       - uses: swatinem/rust-cache@v2
       # Lib tests are pure computation. Window code is not under test, and a
-      # full Miri run over all dependencies is too slow.
+      # full Miri run over all dependencies is too slow. The multi-hundred-step
+      # loops carry #[cfg_attr(miri, ignore)]. One parallel step still runs, so
+      # Miri checks the pool and the atomic fill at a small scale.
       - run: cargo +nightly miri test --lib
