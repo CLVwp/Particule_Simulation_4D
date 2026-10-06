@@ -45,8 +45,14 @@ pub(crate) fn overlay(ctx: &Context, app: &mut App, scene: &SceneOut) {
     let step_total: f32 = p.iter().sum();
     let par_min = app.world.settings.par_min;
     let gpu_render = app.mode == PhysicsMode::Newton && app.tuning.gpu_render;
+    // Residency is the live path. The phase rows need the timestamp
+    // features, so they hide on an adapter without them.
+    let gpu_active = app.gpu_active;
+    let gpu_steps = gpu_active && app.gpu_phase_ms.iter().sum::<f32>() > 0.0;
     let path = if app.mode == PhysicsMode::Fluid {
         format!("fluid grid {} x {}", app.fluid.n, app.fluid.n)
+    } else if gpu_active {
+        format!("gpu ({})", app.tuning.gpu_threshold)
     } else if app.world.bodies.len() >= par_min {
         "parallel".to_string()
     } else {
@@ -116,6 +122,19 @@ pub(crate) fn overlay(ctx: &Context, app: &mut App, scene: &SceneOut) {
                             line(ui, format!("instances painted {}", scene.instances.len()));
                         }
                         line(ui, format!("scene (project + sort) {:.3} ms", app.scene_ms));
+                        if gpu_steps {
+                            head(ui, "GPU physics");
+                            let names = ["integrate", "grid", "contacts", "resolve", "floor"];
+                            let total: f32 = app.gpu_phase_ms.iter().sum();
+                            for (name, ms) in names.iter().zip(app.gpu_phase_ms.iter()) {
+                                let share = if total > 0.0 { 100.0 * ms / total } else { 0.0 };
+                                line(ui, format!("{name:<9} {ms:7.3} ms {share:5.1} %"));
+                            }
+                            line(
+                                ui,
+                                format!("pairs {}   dropped {}", app.gpu_pairs, app.gpu_dropped),
+                            );
+                        }
                         line(ui, format!("adapter: {}", app.adapter_info));
                         head(ui, "Memory");
                         line(
@@ -133,16 +152,29 @@ pub(crate) fn overlay(ctx: &Context, app: &mut App, scene: &SceneOut) {
                                 (size_of::<Body>() * app.world.bodies.len()) as f32 / 1048576.0
                             ),
                         );
-                        tuning_panel(ui, app);
+                        tuning_panel(ui, app, gpu_active);
                     });
                 });
         });
 }
 
 /// The live optimization controls. Every knob edits a running system; the
-/// stats above answer the "did it help" question at a glance.
-fn tuning_panel(ui: &mut Ui, app: &mut App) {
+/// stats above answer the "did it help" question at a glance. `gpu_active`
+/// greys the knobs the GPU path ignores.
+fn tuning_panel(ui: &mut Ui, app: &mut App, gpu_active: bool) {
     head(ui, "Tuning");
+    ui.checkbox(&mut app.tuning.gpu_physics, "GPU physics");
+    ui.add_enabled_ui(app.tuning.gpu_physics, |ui| {
+        let mut threshold = app.tuning.gpu_threshold as f32;
+        slider_row(
+            ui,
+            "gpu threshold",
+            &mut threshold,
+            0.0..=2_000_000.0,
+            10_000.0,
+        );
+        app.tuning.gpu_threshold = threshold as usize;
+    });
     ui.checkbox(&mut app.tuning.gpu_render, "GPU vertex pull");
     // The vertex-pull path skips the CPU scene build, so these knobs do
     // nothing while it runs. Grey them out.
@@ -187,13 +219,17 @@ fn tuning_panel(ui: &mut Ui, app: &mut App) {
     let mut rounds = app.world.settings.resolve_rounds as f32;
     slider_row(ui, "resolve rounds", &mut rounds, 1.0..=8.0, 1.0);
     app.world.settings.resolve_rounds = rounds as usize;
-    slider_row(
-        ui,
-        "resolve epsilon",
-        &mut app.world.settings.resolve_epsilon,
-        0.0..=0.01,
-        0.001,
-    );
+    // The GPU solve ignores the epsilon. Honoring it needs a per-frame
+    // readback that stalls the pipeline. Grey the knob while the GPU runs.
+    ui.add_enabled_ui(!gpu_active, |ui| {
+        slider_row(
+            ui,
+            "resolve epsilon",
+            &mut app.world.settings.resolve_epsilon,
+            0.0..=0.01,
+            0.001,
+        );
+    });
     if ui.button("Reset tuning").clicked() {
         app.tuning = Tuning::default();
         let defaults = SimSettings::default();

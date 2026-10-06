@@ -1,6 +1,7 @@
 //! Window loop: wgpu init, the winit event handler, and the frame render.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalSize;
@@ -52,8 +53,8 @@ struct WindowState {
     /// Body count the GPU buffer holds.
     gpu_n: usize,
     /// Set by the first device error. The physics falls back to the CPU
-    /// for the rest of the session.
-    gpu_failed: bool,
+    /// for the rest of the session. Shared with the error handler.
+    gpu_failed: Arc<AtomicBool>,
     /// Phase timestamps, when the adapter supports the queries.
     ts_set: Option<wgpu::QuerySet>,
     /// Resolved timestamp ticks for the last recorded frame.
@@ -93,9 +94,13 @@ impl WindowState {
         eprintln!("adapter: {}", app.adapter_info);
 
         // The phase timestamps ride along when the adapter has them.
-        let wants_ts = adapter.features().contains(wgpu::Features::TIMESTAMP_QUERY);
+        // The step writes on the encoder, which needs the inside-encoders
+        // feature on top of the base timestamp feature.
+        let needed_ts =
+            wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS;
+        let wants_ts = adapter.features().contains(needed_ts);
         let required = if wants_ts {
-            wgpu::Features::TIMESTAMP_QUERY
+            needed_ts
         } else {
             wgpu::Features::empty()
         };
@@ -108,6 +113,16 @@ impl WindowState {
             trace: wgpu::Trace::default(),
         }))
         .map_err(|error| error.to_string())?;
+        // A device error must drop the session to the CPU path, not kill
+        // the app. The flag reads back on the frame thread.
+        let gpu_failed = Arc::new(AtomicBool::new(false));
+        device.on_uncaptured_error({
+            let gpu_failed = gpu_failed.clone();
+            Arc::new(move |error| {
+                eprintln!("gpu device error, cpu fallback: {error}");
+                gpu_failed.store(true, Ordering::Relaxed);
+            })
+        });
         let gpu = GpuState::new(&device);
         let ts_set = GpuState::timestamp_set(&device);
         let ts_resolve = GpuState::timestamp_resolve(&device);
@@ -173,7 +188,7 @@ impl WindowState {
             gpu,
             gpu_resident: false,
             gpu_n: 0,
-            gpu_failed: false,
+            gpu_failed,
             ts_set,
             ts_resolve,
             ts_stage,
@@ -218,11 +233,12 @@ impl WindowState {
     /// Enters or leaves GPU residency, then records the physics into the
     /// frame encoder. Returns true when the GPU stepped.
     fn step_or_resident(&mut self, app: &mut App, encoder: &mut wgpu::CommandEncoder) -> bool {
-        let want_gpu = !self.gpu_failed
+        let want_gpu = !self.gpu_failed.load(Ordering::Relaxed)
             && app.mode == PhysicsMode::Newton
             && app.tuning.gpu_physics
             && app.world.bodies.len() >= app.tuning.gpu_threshold;
-        if want_gpu && !self.gpu_resident {
+        // An empty world stays on the CPU. There is nothing to upload.
+        if want_gpu && !self.gpu_resident && !app.world.bodies.is_empty() {
             let mirror: Vec<GpuBody> = app.world.bodies.iter().map(GpuBody::from_body).collect();
             self.gpu_n = mirror.len();
             self.gpu.upload_bodies(&self.device, &self.queue, &mirror);
@@ -245,6 +261,11 @@ impl WindowState {
             }
             self.gpu_resident = false;
             self.renderer.clear_external_bodies();
+            // The GPU rows leave the panel, so the path label and the
+            // greyed knobs follow the live path again.
+            app.gpu_phase_ms = [0.0; 5];
+            app.gpu_pairs = 0;
+            app.gpu_dropped = 0;
         }
         if self.gpu_resident && app.world.bodies.len() != self.gpu_n {
             if app.world.bodies.len() > self.gpu_n {
@@ -269,7 +290,8 @@ impl WindowState {
                     .use_external_bodies(&self.device, self.gpu.render_buffer(), 0);
             }
         }
-        if !self.gpu_resident || self.gpu_failed {
+        app.gpu_active = self.gpu_resident;
+        if !self.gpu_resident || self.gpu_failed.load(Ordering::Relaxed) {
             app.step_physics();
             return false;
         }
@@ -298,34 +320,39 @@ impl WindowState {
     // ponytail: one sync poll per frame; a two-slot staging ring if the
     // latency ever shows
     fn read_gpu_feedback(&mut self, app: &mut App) {
-        self.ts_stage
-            .slice(..)
-            .map_async(wgpu::MapMode::Read, |_| {});
-        self.device
-            .poll(wgpu::PollType::wait_indefinitely())
-            .expect("timestamp poll fails");
-        let ticks: [u64; 6] = {
-            let view = self.ts_stage.get_mapped_range(..).expect("map fails");
-            let bytes: Vec<u8> = view.to_vec();
-            let mut ticks = [0u64; 6];
-            for (slot, chunk) in ticks.iter_mut().zip(bytes.chunks_exact(8)) {
-                *slot = u64::from_le_bytes(chunk.try_into().expect("eight bytes"));
+        // Without the timestamp features the phases stay zero and the
+        // panel rows stay hidden. The pair counters are buffer reads, so
+        // they still report.
+        if self.ts_set.is_some() {
+            self.ts_stage
+                .slice(..)
+                .map_async(wgpu::MapMode::Read, |_| {});
+            self.device
+                .poll(wgpu::PollType::wait_indefinitely())
+                .expect("timestamp poll fails");
+            let ticks: [u64; 6] = {
+                let view = self.ts_stage.get_mapped_range(..).expect("map fails");
+                let bytes: Vec<u8> = view.to_vec();
+                let mut ticks = [0u64; 6];
+                for (slot, chunk) in ticks.iter_mut().zip(bytes.chunks_exact(8)) {
+                    *slot = u64::from_le_bytes(chunk.try_into().expect("eight bytes"));
+                }
+                ticks
+            };
+            self.ts_stage.unmap();
+            let mut phases = [0.0f32; 5];
+            for i in 0..5 {
+                phases[i] = (ticks[i + 1].saturating_sub(ticks[i])) as f32 * self.ts_period / 1.0e6;
             }
-            ticks
-        };
-        self.ts_stage.unmap();
-        let mut phases = [0.0f32; 5];
-        for i in 0..5 {
-            phases[i] = (ticks[i + 1].saturating_sub(ticks[i])) as f32 * self.ts_period / 1.0e6;
+            app.gpu_phase_ms = phases;
+            let total: f32 = phases.iter().sum();
+            app.step_ms = app.step_ms * SMOOTH_KEEP + total * SMOOTH_NEW;
         }
-        app.gpu_phase_ms = phases;
         let (pairs, dropped) = self
             .gpu
             .pair_counters(&self.device, &self.queue, self.gpu_n);
         app.gpu_pairs = pairs;
         app.gpu_dropped = dropped;
-        let total: f32 = phases.iter().sum();
-        app.step_ms = app.step_ms * SMOOTH_KEEP + total * SMOOTH_NEW;
     }
 
     /// Renders one frame: physics, scene, particles, then egui on top.

@@ -63,6 +63,11 @@ working default:
   so with two rounds long runs drift a little.
 - **PAR_MIN** — the rayon pool starts above this body count. Set it to `0`
   to force the parallel path, or raise it to force the inline path.
+- **GPU physics** — runs integrate, the broad phase, and the Jacobi solve
+  in compute shaders above the body threshold. Below the threshold, on a
+  device error, or in fluid mode, the CPU pool takes over. The phase rows
+  show the five GPU passes, and the resolve epsilon greys out while the
+  GPU steps.
 
 `Reset tuning` restores every default.
 
@@ -72,6 +77,8 @@ working default:
   the body count grows.
 - The physics step is the frame-time ceiling. The F1 panel shows which phase
   dominates: integrate, grid, contacts, resolve, or floor.
+- Above the threshold the step runs in compute shaders. A settled 500k pile
+  steps in about 8 ms on the GPU against about 18 ms on the CPU pool.
 - Results do not depend on the thread count. A test pins this property.
 
 ## Architecture
@@ -85,6 +92,8 @@ src/
     widgets.rs  reusable egui components.
     gui/        the pages: menu, settings, HUD, side windows, overlay.
     scene/      the scene build: project, cull, LOD merge, sort.
+    gpu/        compute shaders for the physics step, and the body
+                buffer the draw reads.
   perf.rs       counting allocator behind the memory stats.
 ```
 

@@ -683,7 +683,11 @@ impl GpuState {
     /// The timestamp query set for the six phase boundaries, or `None`
     /// without the feature.
     pub(crate) fn timestamp_set(device: &wgpu::Device) -> Option<wgpu::QuerySet> {
-        if !device.features().contains(wgpu::Features::TIMESTAMP_QUERY) {
+        // The step writes timestamps on the encoder, which needs the
+        // inside-encoders feature on top of the base timestamp feature.
+        let needed =
+            wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS;
+        if !device.features().contains(needed) {
             return None;
         }
         Some(device.create_query_set(&wgpu::QuerySetDescriptor {
@@ -849,7 +853,7 @@ impl GpuState {
 
     /// Reads the bodies back. One staging buffer per call; the frame loop
     /// never calls this, only the parity tests and the residency exit do.
-    // ponytail: per-call staging; a ring of two when the F1 count readback lands
+    // ponytail: per-call staging; a ring of two if the latency ever shows
     pub(crate) fn download_bodies(
         &self,
         device: &wgpu::Device,

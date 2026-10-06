@@ -58,6 +58,12 @@ The skill is linked at `.claude/skills/rust-skills`. The files live at `.agents/
 - wgpu 30 traps: `get_mapped_range` returns a `Result`, and its view
   owns the map. Drop the view inside a block before `unmap`.
   `NonZeroU64` comes from `std::num`, not from `wgpu`.
+- `encoder.write_timestamp` needs `TIMESTAMP_QUERY_INSIDE_ENCODERS` on
+  top of `TIMESTAMP_QUERY`. Request both, and gate the query set on
+  both.
+- A spawn while resident grows the buffers and uploads the tail only.
+  A full rewrite from the CPU mirror teleports the resident pile: its
+  positions froze at residency entry.
 
 ## Documentation rule — ASD-STE100 (absolute)
 

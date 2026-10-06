@@ -141,6 +141,8 @@ pub(crate) struct App {
     pub(crate) gpu_phase_ms: [f32; 5],
     /// Pairs the GPU found, one frame late.
     pub(crate) gpu_pairs: u32,
+    /// True while the body state lives in the GPU buffers.
+    pub(crate) gpu_active: bool,
     /// Pairs the pair budget dropped, one frame late.
     pub(crate) gpu_dropped: u32,
     /// Time of the previous frame. Drives the move scale.
@@ -178,16 +180,12 @@ impl App {
             adapter_info: "unknown".to_string(),
             gpu_phase_ms: [0.0; 5],
             gpu_pairs: 0,
+            gpu_active: false,
             gpu_dropped: 0,
             last_frame: None,
         }
     }
 
-    /// Advances one frame. Smooths the fps, applies the camera moves, and
-    /// steps the active physics mode once at [`FIXED_DT`] times
-    /// [`App::time_scale`]. The step runs only in the viewport, and only
-    /// while the sim is not paused.
-    // ponytail: fixed dt decoupled from real time; wall-clock dt if physics gets speed-sensitive
     /// Smooths the fps, applies the camera moves, and advances the frame
     /// clock. The physics branch calls this before its own step.
     // ponytail: fixed dt decoupled from real time; wall-clock dt if physics gets speed-sensitive
@@ -206,6 +204,9 @@ impl App {
         apply_moves(&self.input, &mut self.cam, scale);
     }
 
+    /// Steps the active physics mode once at [`FIXED_DT`] times
+    /// [`App::time_scale`]. The step runs only in the viewport, and only
+    /// while the sim is not paused.
     pub(crate) fn step_physics(&mut self) {
         self.tick_frame();
         // The sim waits behind the menu, and pause holds the step.
