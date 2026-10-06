@@ -248,10 +248,10 @@ mod tests {
             pitch: 0.0,
             dist: 30.0,
         };
-        zoom(&mut cam, -10.0);
-        assert_eq!(cam.dist, 40.0);
+        zoom(&mut cam, -100.0);
+        assert_eq!(cam.dist, 200.0);
         cam.dist = 4.0;
-        zoom(&mut cam, 10.0);
+        zoom(&mut cam, 100.0);
         assert_eq!(cam.dist, 3.0);
     }
 }
