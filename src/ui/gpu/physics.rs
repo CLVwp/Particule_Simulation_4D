@@ -83,7 +83,6 @@ fn pair_bind(
 
 /// Binds the grid and pair kernels: bodies, sim, table, cursor, ids, the
 /// pair CSR, and the flat pair list.
-#[expect(clippy::too_many_arguments)] // one buffer per binding, fixed by the layout
 /// Binds the grid and pair kernels: bodies, sim, table, cursor, ids, the
 /// pair CSR, the pair list, and the cell cache.
 #[expect(clippy::too_many_arguments)] // one buffer per binding, fixed by the layout

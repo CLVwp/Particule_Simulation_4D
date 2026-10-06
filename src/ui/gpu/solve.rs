@@ -18,7 +18,7 @@ impl GpuState {
         encoder.clear_buffer(&self.bc_start_buf, 0, None);
         encoder.clear_buffer(&self.bc_cursor_buf, 0, None);
         let groups = (n as u32).div_ceil(WORKGROUP);
-        let pair_groups = (self.pairs_capacity as u32).div_ceil(WORKGROUP);
+        let pair_groups = self.pairs_capacity.div_ceil(WORKGROUP);
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("solve count"),
@@ -362,7 +362,7 @@ mod tests {
         let (_, pairs) = state.download_pairs(&device, &queue, count, sim.pair_cap);
         let total = starts[count as usize] as usize;
         assert_eq!(total, pairs.len() * 2, "item count is not two per pair");
-        for b in 0..count as usize {
+        for b in 0..count {
             let slice = &items[starts[b] as usize..starts[b + 1] as usize];
             for w in slice.windows(2) {
                 assert!(
