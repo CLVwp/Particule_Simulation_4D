@@ -6,6 +6,11 @@ on:
     branches: [main]
   pull_request:
 
+env:
+  # The nightly cache expires daily. Full re-downloads hit broken pipes on
+  # the runner; the default of 3 tries is too few.
+  CARGO_NET_RETRY: "10"
+
 jobs:
   checks:
     runs-on: ubuntu-latest
@@ -19,6 +24,10 @@ jobs:
 
   miri:
     runs-on: ubuntu-latest
+    env:
+      # Stacked Borrows reports a false positive in crossbeam-epoch, which
+      # rayon pulls in. Tree Borrows is the supported model for that code.
+      MIRIFLAGS: -Zmiri-tree-borrows
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly
