@@ -13,7 +13,7 @@ use crate::ui::gpu::CamUniforms;
 use crate::ui::input::{Drag, apply_drag, zoom};
 use crate::ui::renderer::{Frame, Renderer};
 use crate::ui::scene::SceneOut;
-use crate::ui::{App, PhysicsMode};
+use crate::ui::{App, Page, PhysicsMode};
 
 /// Title of the app window.
 const WINDOW_TITLE: &str = "Particule Simulation 4D";
@@ -334,6 +334,8 @@ impl ApplicationHandler for Handler {
                         // The F1 toggle and the rebind capture ignore egui.
                         if key == "f1" {
                             app.debug = !app.debug;
+                        } else if key == "space" && app.page == Page::Sim {
+                            app.paused = !app.paused;
                         } else if let Some(action) = app.input.rebinding {
                             // Escape cancels the rebind.
                             if key != "escape" {

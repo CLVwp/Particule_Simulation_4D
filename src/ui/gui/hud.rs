@@ -36,9 +36,12 @@ pub(crate) fn hud(ctx: &Context, app: &mut App) {
                 for help in [
                     "Drag: orbit. Shift+drag or middle-drag: pan. Wheel: zoom.",
                     "Movement follows the camera.",
-                    "F1: engine stats.",
+                    "Space: pause.  F1: engine stats.",
                 ] {
                     faint_px(ui, help, 12.0);
+                }
+                if app.paused {
+                    faint_px(ui, "PAUSED", 14.0);
                 }
                 if ui.button("Menu").clicked() {
                     app.page = Page::Menu;

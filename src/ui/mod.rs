@@ -67,6 +67,10 @@ pub(crate) struct App {
     pub(crate) spawn_radius: f32,
     /// Spawn panel: launch speed.
     pub(crate) spawn_speed: f32,
+    /// True while the step is held. Space toggles it.
+    pub(crate) paused: bool,
+    /// Multiplier on the fixed step. 0.1 crawls, 4.0 races.
+    pub(crate) time_scale: f32,
     /// Orbit camera.
     pub(crate) cam: Camera,
     /// Active mouse drag gesture.
@@ -106,6 +110,8 @@ impl App {
             spawn_count: 1000,
             spawn_radius: BODY_RADIUS,
             spawn_speed: SPAWN_SPEED,
+            paused: false,
+            time_scale: 1.0,
             cam: Camera::default(),
             drag: None,
             last_mouse: None,
@@ -121,7 +127,9 @@ impl App {
     }
 
     /// Advances one frame. Smooths the fps, applies the camera moves, and
-    /// steps the active physics mode once at [`FIXED_DT`].
+    /// steps the active physics mode once at [`FIXED_DT`] times
+    /// [`App::time_scale`]. The step runs only in the viewport, and only
+    /// while the sim is not paused.
     // ponytail: fixed dt decoupled from real time; wall-clock dt if physics gets speed-sensitive
     pub(crate) fn step_physics(&mut self) {
         let now = Instant::now();
@@ -136,10 +144,15 @@ impl App {
         // The camera slide scales with the frame rate. Physics does not.
         let scale = (dt / FIXED_DT).clamp(0.25, 4.0);
         apply_moves(&self.input, &mut self.cam, scale);
+        // The sim waits behind the menu, and pause holds the step.
+        if self.page != Page::Sim || self.paused {
+            return;
+        }
         let t = Instant::now();
+        let step_dt = FIXED_DT * self.time_scale;
         match self.mode {
-            PhysicsMode::Newton => self.world.step(FIXED_DT),
-            PhysicsMode::Fluid => self.fluid.step(FIXED_DT),
+            PhysicsMode::Newton => self.world.step(step_dt),
+            PhysicsMode::Fluid => self.fluid.step(step_dt),
         }
         let ms = (t.elapsed().as_secs_f32() * 1000.0).min(1000.0);
         self.step_ms = self.step_ms * SMOOTH_KEEP + ms * SMOOTH_NEW;
