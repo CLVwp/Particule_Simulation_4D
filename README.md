@@ -14,7 +14,7 @@ A remake of my C++ / Raylib project
 | Rendering | [wgpu](https://wgpu.rs) 30 — one instanced draw call for all bodies |
 | Window | [winit](https://docs.rs/winit) 0.30 |
 | UI | [egui](https://docs.rs/egui) 0.36 |
-| Physics | CPU, rayon thread pool, one worker per core |
+| Physics | CPU rayon pool, or GPU compute shaders above a threshold |
 | Benchmarks | [criterion](https://github.com/bheisler/criterion.rs) |
 
 ## Prerequisites
@@ -122,7 +122,13 @@ app draws one step per frame and shows one sample.
 - [x] Navier-Stokes fluid mode
 - [x] GPU instanced rendering with tile-merge LOD
 - [x] Live tuning panel
-- [ ] Physics on the GPU with compute shaders
+- [x] Physics on the GPU with compute shaders
+
+The GPU physics runs integrate, the broad phase, and the Jacobi solve
+in compute shaders. Enable it in the F1 panel; below the threshold the
+CPU pool takes over. One GPU step holds a settled 500k pile in about
+8 ms against about 18 ms on the CPU. Results stay deterministic per
+device, and the CPU path remains the reference.
 
 ## References
 
