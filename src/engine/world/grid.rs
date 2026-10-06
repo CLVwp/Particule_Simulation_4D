@@ -83,7 +83,8 @@ impl World {
         let par_min = settings.par_min;
         // Guards the `as u32` body-index casts below.
         debug_assert!(bodies.len() <= u32::MAX as usize);
-        cell_sort.clear();
+        // No clear: the fill below overwrites every slot, so a resize only
+        // zero-fills the growth. One full memset per step stays out.
         cell_sort.resize(bodies.len(), (0, 0));
         let fill = |(i, slot): (usize, &mut (u64, u32))| {
             *slot = (cell_key(bodies[i].pos, cs), i as u32);
