@@ -15,6 +15,11 @@ scene 7.565 ms — about 40 % of the frame. The frame is render-bound
 again. The GPU storage buffer item now leads, and grid work beats
 body sleep at this contact count.
 
+In-app F1 at 1 000 000 bodies: contacts about 12 ms (55-69 %),
+grid about 6 ms (25-30 %), resolve about 2.5 ms (10 %). Grid grows
+linearly with the body count, so its share rises with every sparse
+scene. Parallel run counting pays from 500k already.
+
 Tags: `[algo]` algorithm, `[par]` parallelism, `[arch]` architecture,
 `[visual]` visual shortcut.
 

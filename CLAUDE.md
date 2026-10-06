@@ -15,6 +15,20 @@ The skill is linked at `.claude/skills/rust-skills`. The files live at `.agents/
 - HIGH priority prefixes, apply when relevant: `api-`, `opt-`, `conc-`, `num-`.
 - After Rust changes, run `cargo test`. Do not claim success without test output.
 
+## Performance protocol — engine work
+
+- Measure before and after every engine change. Run
+  `cargo run --release --example phase_table 500000`. Compare the
+  phase table. State the numbers in the report.
+- The per-body contact order is a hard invariant. Each body's contact
+  list must stay in ascending contact order. Any other order breaks
+  the determinism of the Jacobi sum. Keep the order when you touch the
+  scan, the CSR fill, or the solver. The test
+  `result_does_not_depend_on_thread_count` guards it.
+- Profile before you pick a target. The heaviest phase moves with the
+  scene: a dense pile stresses contacts, a sparse scene stresses grid
+  and scene build. Read the F1 table or the phase table first.
+
 ## Documentation rule — ASD-STE100 (absolute)
 
 All documentation in this repo obeys ASD-STE100 (Simplified Technical English):
