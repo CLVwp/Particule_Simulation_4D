@@ -4,19 +4,48 @@ Baseline at 500 000 bodies (F1 panel, RX 7800 XT): step 31.99 ms.
 contacts 24.22 ms, resolve 3.91 ms, grid 3.36 ms. Order the work by
 phase weight: contacts first.
 
+After the 2026-10-06 wave (settled pile, `cargo run --release
+--example phase_table 500000`): step 15.53 ms. contacts 10.12 ms,
+grid 2.97 ms, resolve 2.18 ms. The phase table example reproduces the
+F1 table headless. Use it before and after every change.
+
 Tags: `[algo]` algorithm, `[par]` parallelism, `[arch]` architecture,
 `[visual]` visual shortcut.
 
 Verify every change three ways: `cargo test` (the determinism test must
 stay green), `cargo bench`, and the F1 phase table before and after.
 
+## State — 2026-10-06
+
+Read this section before the first change of a new session.
+
+- The F1 panel tunes every optimization live. Render knobs live in
+  `Tuning` (`ui/scene.rs`). Engine knobs live in `SimSettings`
+  (`par_min`, `prune_dead_pairs`).
+- At 500k bodies the step is physics-bound. The render knobs do not
+  move the FPS. Work on the engine phases only.
+- The scan is a sorted-key CSR with a monotone merge walk per stencil
+  offset. `grid.rs` holds the key sort. `contacts.rs` holds the walk,
+  the CSR fill, and the `bc_*` body lists.
+- A hash-map scan was measured twice and reverted. It regressed at
+  small counts. Do not revisit it without a new design.
+- `world.rs::par_each` is the pool gate. It compares the slice length
+  with `settings.par_min`. Reuse it for the parallel CSR fill.
+- Per-phase timings sit in `World::phase_ms`. The F1 table reads them.
+
 ## Contacts — 24.2 ms (75 % of the step)
 
-- [ ] `[par]` **Parallel CSR fill.** Count contacts per body in chunks,
-  prefix-sum, then scatter with per-contact ranks. The order inside each
-  body list stays exact, so the Jacobi sum stays deterministic. The wave-2
-  stop rule blocked this under ~100k contacts; 959k contacts clear it.
-  Est: contacts 24 → 12-16 ms. Effort: medium.
+- [x] `[par]` **Parallel CSR fill.** Atomic fetch-add ranks, then an
+  insertion sort restores the ascending contact order per body. One code
+  path serves both drivers, so the sums stay deterministic. Result: the
+  fill alone moved 21.78 → 20.16 ms. The scan, not the fill, was the
+  real cost.
+- [x] `[algo]` **Merge scan.** New item, found by profiling the scan.
+  A translated cell key is monotone in the own key, so each of the 13
+  stencil offsets owns one merge pointer that only moves forward. One
+  binary search per offset and chunk replaces one search per cell and
+  offset. Result: contacts 20.16 → 10.12 ms at 500k. Pair count
+  unchanged (568 426). Determinism tests stay green.
 - [ ] `[algo]` **Body sleep.** A body at rest under a small speed leaves
   the scan until an impulse wakes it. A settled pile then costs almost
   nothing. Effort: medium-high. Touches spawn, solver, and the floor.
@@ -33,24 +62,25 @@ stay green), `cargo bench`, and the F1 phase table before and after.
 
 ## Resolve — 3.9 ms (12 % of the step)
 
-- [ ] `[algo]` **Expose the round count.** Put `RESOLVE_ROUNDS` in the
-  tuning panel. One round halves the phase; piles settle softer. A direct
-  stiffness-for-time trade. Effort: trivial.
-- [ ] `[algo]` **Early exit.** Stop the rounds when the summed delta drops
-  below a small epsilon. Resting piles then skip most rounds.
-  Effort: small.
+- [x] `[algo]` **Expose the round count.** `SimSettings.resolve_rounds`,
+  live slider in the F1 panel. Default stays 2.
+- [x] `[algo]` **Early exit.** `SimSettings.resolve_epsilon`. Stops the
+  rounds when the mean delta motion drops below it. Zero disables.
+  Default zero, so the default physics is unchanged.
 - [ ] `[par]` **SIMD delta math.** `wide` or portable SIMD on the delta
   pass. Est: 20-40 % of the phase. Effort: small-medium.
 
 ## Grid — 3.4 ms (10 % of the step)
 
-- [ ] `[algo]` **Counting-sort build.** Count bodies per cell, prefix the
-  runs, then scatter with ranks. Removes the comparison sort entirely.
-  Body order inside a cell stays ascending, so emission order holds.
-  Est: grid → about 1 ms. Effort: medium.
+- [ ] `[algo]` **Counting-sort build.** REJECTED by arithmetic, not by
+  measurement. The key space is 63 bits, so a counting sort needs radix
+  passes first: 4 passes by 16-bit digits cost more in histogram and
+  scatter traffic than the rayon comparison sort at 500k. Revisit only
+  with a dense cell id source.
 - [ ] `[par]` **Parallel run counting.** Build `cell_keys` and
   `cell_start` in chunks with one boundary fixup. Today this pass is
-  sequential. Est: about -1 ms. Effort: small.
+  sequential. Est: about -0.5 ms at 500k. Deprioritized: about 3 % of
+  the step now.
 - [ ] `[algo]` **Radix sort on the 21-bit fields.** Three 7-bit passes
   beat the comparison sort at this size. The counting-sort build above
   may replace this item.
@@ -68,3 +98,19 @@ stay green), `cargo bench`, and the F1 phase table before and after.
   first. A hard bound for extreme scenes. Effort: small.
 - [ ] `[arch]` **mimalloc.** Swap the global allocator. Small wins on
   allocation-heavy frames. Effort: trivial.
+
+## CI — for a dedicated session
+
+`checks` is green since the wgpu migration. `miri` failed for three
+known causes:
+
+1. gpui era: `yeslogic-fontconfig-sys` failed on Linux. The migration
+   removed the dependency. Solved.
+2. Network: the nightly cache expires daily. Downloads hit broken
+   pipes. Drafted fix: `CARGO_NET_RETRY: "10"`.
+3. Miri: `crossbeam-epoch` trips a Stacked Borrows false positive in
+   the rayon pool (`internal.rs:567`). Known upstream issue. Not a
+   bug here. Drafted fix: `MIRIFLAGS: -Zmiri-tree-borrows`.
+
+The two fixes sit uncommitted in `.github/workflows/ci.yml`. Verify
+them, then commit.

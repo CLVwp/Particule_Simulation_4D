@@ -482,11 +482,23 @@ fn tuning_panel(ui: &mut Ui, app: &mut App) {
     let mut par = app.world.settings.par_min as f32;
     slider_row(ui, "PAR_MIN", &mut par, 0.0..=16384.0, 256.0);
     app.world.settings.par_min = par as usize;
+    let mut rounds = app.world.settings.resolve_rounds as f32;
+    slider_row(ui, "resolve rounds", &mut rounds, 1.0..=8.0, 1.0);
+    app.world.settings.resolve_rounds = rounds as usize;
+    slider_row(
+        ui,
+        "resolve epsilon",
+        &mut app.world.settings.resolve_epsilon,
+        0.0..=0.01,
+        0.001,
+    );
     if ui.button("Reset tuning").clicked() {
         app.tuning = Tuning::default();
         let defaults = crate::ui::App::new();
         app.world.settings.par_min = defaults.world.settings.par_min;
         app.world.settings.prune_dead_pairs = defaults.world.settings.prune_dead_pairs;
+        app.world.settings.resolve_rounds = defaults.world.settings.resolve_rounds;
+        app.world.settings.resolve_epsilon = defaults.world.settings.resolve_epsilon;
     }
 }
 

@@ -9,8 +9,8 @@ use super::contacts::{Contact, J_SIDE};
 pub(super) const PAIR_RESTITUTION: f32 = 0.6;
 const SLOP: f32 = 0.001; // allowed penetration
 const CORRECTION: f32 = 0.8; // share of overlap removed each step
-/// Parallel solve rounds per step. Two rounds keep piles stiff enough.
-const RESOLVE_ROUNDS: usize = 2;
+/// Default solve rounds per step. Two rounds keep piles stiff enough.
+pub(super) const RESOLVE_ROUNDS: usize = 2;
 
 /// Impulse and correction data for one contact, recomputed every round.
 #[derive(Clone, Copy, Debug)]
@@ -86,9 +86,11 @@ fn contact_share(d: &ContactDelta, c: &Contact, j_side: bool) -> ([f32; 3], [f32
 }
 
 impl World {
-    /// Solves the contacts in `RESOLVE_ROUNDS` Jacobi rounds.
+    /// Solves the contacts in `settings.resolve_rounds` Jacobi rounds.
     /// Each round reads one snapshot, computes all impulses in parallel, then
     /// applies them in parallel. No body is written by two threads at once.
+    /// A positive `resolve_epsilon` skips the remaining rounds when the mean
+    /// delta motion drops below it.
     /// ponytail: Jacobi is softer than sequential Gauss-Seidel; two rounds make up for it
     pub(super) fn resolve(&mut self) {
         let World {
@@ -102,7 +104,9 @@ impl World {
         } = self;
         let rest = settings.pair_restitution;
         let par_min = settings.par_min;
-        for _ in 0..RESOLVE_ROUNDS {
+        let rounds = settings.resolve_rounds.max(1);
+        let epsilon = settings.resolve_epsilon;
+        for _ in 0..rounds {
             // Every slot is rewritten below, so only growth needs a write.
             deltas.resize(contacts.len(), ContactDelta::ZERO);
             // Reclaim capacity after a spawn transient, with hysteresis.
@@ -120,12 +124,25 @@ impl World {
                     .zip(contacts.par_iter())
                     .for_each(delta_of);
             }
+            // Resting piles produce near-zero deltas. Skip the rest of the
+            // rounds. The mean normalizes the sum over the contact count.
+            if epsilon > 0.0 && !deltas.is_empty() {
+                let motion = deltas
+                    .par_iter()
+                    .map(|d| d.impulse.abs() + d.push)
+                    .sum::<f32>()
+                    / deltas.len() as f32;
+                if motion < epsilon {
+                    break;
+                }
+            }
 
             let apply = |(b, body): (usize, &mut Body)| {
                 let (mut dpos, mut dvel) = ([0.0f32; 3], [0.0f32; 3]);
                 let from = bc_start[b] as usize;
                 let to = bc_start[b + 1] as usize;
-                for &tag in &bc_items[from..to] {
+                for tag in &bc_items[from..to] {
+                    let tag = tag.load(std::sync::atomic::Ordering::Relaxed);
                     let idx = (tag & !J_SIDE) as usize;
                     let (dp, dv) = contact_share(&deltas[idx], &contacts[idx], tag & J_SIDE != 0);
                     for k in 0..3 {

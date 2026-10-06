@@ -1,5 +1,6 @@
 //! The world container: bodies, the step pipeline, and pool helpers.
 
+use std::sync::atomic::AtomicU32;
 use std::time::Instant;
 
 use rayon::prelude::*;
@@ -52,9 +53,11 @@ pub struct World {
     /// Per-body contact index as flat arrays: offsets into `bc_items`.
     pub(super) bc_start: Vec<u32>,
     /// Fill cursor for `bc_items`, kept across steps to avoid reallocation.
-    pub(super) bc_cursor: Vec<u32>,
+    /// Atomics so the parallel fill can rank contacts from shared state.
+    pub(super) bc_cursor: Vec<AtomicU32>,
     /// Contact tags in body order. Bit `J_SIDE` marks the `j` side.
-    pub(super) bc_items: Vec<u32>,
+    /// Atomics so the parallel fill can write slots from shared state.
+    pub(super) bc_items: Vec<AtomicU32>,
     /// Wall time of the last step per phase, in ms:
     /// integrate, grid, contacts, resolve, floor. Read by the debug overlay.
     pub phase_ms: [f32; 5],

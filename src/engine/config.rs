@@ -1,6 +1,6 @@
 //! Shared tuning constants and the per-simulation settings.
 
-use super::resolve::PAIR_RESTITUTION;
+use super::resolve::{PAIR_RESTITUTION, RESOLVE_ROUNDS};
 
 /// Downward acceleration, in units per second squared.
 pub const GRAVITY: f32 = -9.81;
@@ -35,6 +35,11 @@ pub struct SimSettings {
     /// Keep only overlapping pairs in the contact list. The pairs this drops
     /// contribute zero to the solve, so the physics is unchanged either way.
     pub prune_dead_pairs: bool,
+    /// Jacobi solve rounds per step.
+    pub resolve_rounds: usize,
+    /// Skip the remaining rounds when the mean delta motion drops below
+    /// this. Zero disables the early exit.
+    pub resolve_epsilon: f32,
 }
 
 impl Default for SimSettings {
@@ -46,6 +51,8 @@ impl Default for SimSettings {
             pair_restitution: PAIR_RESTITUTION,
             par_min: PAR_MIN,
             prune_dead_pairs: true,
+            resolve_rounds: RESOLVE_ROUNDS,
+            resolve_epsilon: 0.0,
         }
     }
 }
