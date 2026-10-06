@@ -43,6 +43,11 @@ Read this section before the first change of a new session.
 - `world.rs::par_each` is the pool gate. It compares the slice length
   with `settings.par_min`. Reuse it for the parallel CSR fill.
 - Per-phase timings sit in `World::phase_ms`. The F1 table reads them.
+- Every number in this file comes from sphere-only piles. The `step_shape`
+  bench group adds cube and half-and-half piles at 10k, 100k, 500k, and
+  1M, one settled pile per mix, same count per scale. Physics reads no
+  shape tag, so the three rows of a scale must stay equal. A gap means
+  the engine grew shape-dependent.
 
 ## Contacts — 24.2 ms (75 % of the step)
 

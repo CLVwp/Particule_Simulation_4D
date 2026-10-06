@@ -85,6 +85,28 @@ The engine holds the laws of motion and the solver. It knows nothing about
 the GPU or the UI, so you can test it, bench it, or reuse it anywhere.
 `cargo test` runs the whole suite. `cargo bench` measures the step phases.
 
+## Benchmarks
+
+Run one group to keep the wait short:
+
+```bash
+cargo bench --bench engine -- step_shape
+```
+
+| Group | Measures |
+|---|---|
+| `step` | full step on settled sphere piles, 1k to 30k bodies |
+| `spread` | full step on sparse scenes, almost no contacts |
+| `thread_scaling` | step cost at 1, half, and all detected threads |
+| `step_shape` | sphere, cube, and half-and-half piles at 10k, 100k, 500k, 1M |
+
+The engine never reads the shape tag. The three `step_shape` rows of one
+scale must stay equal. A gap means the physics grew shape-dependent.
+
+A bench case takes longer than one app frame. The bench builds a settled
+pile, warms up, then times hundreds of steps for stable statistics. The
+app draws one step per frame and shows one sample.
+
 ## Roadmap
 
 - [x] 3D particle system and camera
