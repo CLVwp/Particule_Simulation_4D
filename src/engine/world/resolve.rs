@@ -16,6 +16,11 @@ pub(in crate::engine) struct ContactDelta {
     n: [f32; 3],
     push: f32,
     impulse: f32,
+    /// Unit tangent along the relative tangential speed. Zero vector when
+    /// the pair does not slide.
+    t: [f32; 3],
+    /// Friction impulse along `t`. Zero when `pair_friction` is zero.
+    jt: f32,
 }
 
 impl ContactDelta {
@@ -23,14 +28,19 @@ impl ContactDelta {
         n: [0.0; 3],
         push: 0.0,
         impulse: 0.0,
+        t: [0.0; 3],
+        jt: 0.0,
     };
 }
 
 // Layout guards. These types fill the hot arrays, so their size must not drift.
-const _: () = assert!(std::mem::size_of::<ContactDelta>() == 20);
+const _: () = assert!(std::mem::size_of::<ContactDelta>() == 36);
+// ponytail: 36 bytes, not 20. The apply pass reads no velocities, so it
+// cannot rebuild the tangent; the direction must ride with the delta. The
+// precomputed-shares item in TODO.md grows this struct further by design.
 
 /// Impulse + positional correction between two spheres, from their current state.
-fn contact_delta(a: &Body, b: &Body, c: &Contact, rest: f32) -> ContactDelta {
+fn contact_delta(a: &Body, b: &Body, c: &Contact, rest: f32, friction: f32) -> ContactDelta {
     let d = [
         b.pos[0] - a.pos[0],
         b.pos[1] - a.pos[1],
@@ -56,8 +66,30 @@ fn contact_delta(a: &Body, b: &Body, c: &Contact, rest: f32) -> ContactDelta {
     } else {
         0.0
     };
+    // Tangential share of the relative velocity, and the friction impulse
+    // that removes the configured share of it. Zero friction costs one dot.
+    let vt = [
+        rv[0] - vn * n[0],
+        rv[1] - vn * n[1],
+        rv[2] - vn * n[2],
+    ];
+    let vt2 = vt[0] * vt[0] + vt[1] * vt[1] + vt[2] * vt[2];
+    let (t, jt) = if friction > 0.0 && vt2 > 1e-18 {
+        let vt_len = vt2.sqrt();
+        let t = [vt[0] / vt_len, vt[1] / vt_len, vt[2] / vt_len];
+        let jt = -friction * vt_len / (1.0 / c.mi + 1.0 / c.mj);
+        (t, jt)
+    } else {
+        ([0.0; 3], 0.0)
+    };
     let push = (min_d - dist - SLOP).max(0.0) * CORRECTION / (c.mi + c.mj);
-    ContactDelta { n, push, impulse }
+    ContactDelta {
+        n,
+        push,
+        impulse,
+        t,
+        jt,
+    }
 }
 
 /// Contribution of one contact to one of its bodies. `j_side` picks the side.
@@ -75,9 +107,9 @@ fn contact_share(d: &ContactDelta, c: &Contact, j_side: bool) -> ([f32; 3], [f32
             sign * d.n[2] * d.push * m_pos,
         ],
         [
-            sign * d.n[0] * d.impulse / m_vel,
-            sign * d.n[1] * d.impulse / m_vel,
-            sign * d.n[2] * d.impulse / m_vel,
+            sign * (d.n[0] * d.impulse + d.t[0] * d.jt) / m_vel,
+            sign * (d.n[1] * d.impulse + d.t[1] * d.jt) / m_vel,
+            sign * (d.n[2] * d.impulse + d.t[2] * d.jt) / m_vel,
         ],
     )
 }
@@ -100,6 +132,7 @@ impl World {
             ..
         } = self;
         let rest = settings.pair_restitution;
+        let friction = settings.pair_friction;
         let par_min = settings.par_min;
         let rounds = settings.resolve_rounds.max(1);
         let epsilon = settings.resolve_epsilon;
@@ -112,7 +145,13 @@ impl World {
                 deltas.shrink_to_fit();
             }
             let delta_of = |(d, c): (&mut ContactDelta, &Contact)| {
-                *d = contact_delta(&bodies[c.i as usize], &bodies[c.j as usize], c, rest);
+                *d = contact_delta(
+                    &bodies[c.i as usize],
+                    &bodies[c.j as usize],
+                    c,
+                    rest,
+                    friction,
+                );
             };
             if deltas.len() < par_min {
                 deltas.iter_mut().zip(contacts.iter()).for_each(delta_of);

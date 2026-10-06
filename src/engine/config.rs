@@ -32,6 +32,9 @@ pub struct SimSettings {
     pub ground_friction: f32,
     /// Fraction of relative speed kept when two bodies collide.
     pub pair_restitution: f32,
+    /// Share of relative tangential speed removed at each contact, per solve
+    /// round. Zero keeps the pairs frictionless.
+    pub pair_friction: f32,
     /// Pool work starts above this body count. Live view of [`PAR_MIN`].
     pub par_min: usize,
     /// Keep only overlapping pairs in the contact list. The pairs this drops
@@ -42,6 +45,10 @@ pub struct SimSettings {
     /// Skip the remaining rounds when the mean delta motion drops below
     /// this. Zero disables the early exit.
     pub resolve_epsilon: f32,
+    /// Speed cap per body, in units per second. The broad phase reaches one
+    /// neighbor cell per step, so a body above `cell_size / dt` of relative
+    /// speed can cross a pair without a contact. Zero disables the cap.
+    pub max_speed: f32,
 }
 
 impl Default for SimSettings {
@@ -51,10 +58,12 @@ impl Default for SimSettings {
             floor_restitution: FLOOR_RESTITUTION,
             ground_friction: GROUND_FRICTION,
             pair_restitution: PAIR_RESTITUTION,
+            pair_friction: 0.0,
             par_min: PAR_MIN,
             prune_dead_pairs: true,
             resolve_rounds: RESOLVE_ROUNDS,
             resolve_epsilon: 0.0,
+            max_speed: 0.0,
         }
     }
 }

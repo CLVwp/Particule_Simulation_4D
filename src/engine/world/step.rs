@@ -12,7 +12,10 @@ impl World {
     /// Debug builds panic when `dt` is zero, negative, or not finite. A
     /// bad `dt` poisons every position, so the guard fires at the call.
     pub fn step(&mut self, dt: f32) {
-        debug_assert!(dt.is_finite() && dt > 0.0, "dt must be finite and above zero");
+        debug_assert!(
+            dt.is_finite() && dt > 0.0,
+            "dt must be finite and above zero"
+        );
         let t = Instant::now();
         self.integrate(dt);
         self.phase_ms[0] = super::ms_since(t);
@@ -33,9 +36,22 @@ impl World {
     /// Explicit Euler integration, split across the pool.
     fn integrate(&mut self, dt: f32) {
         let g = self.settings.gravity;
+        let cap = self.settings.max_speed;
         let par_min = self.settings.par_min;
         super::par_each(&mut self.bodies, par_min, |b| {
             b.vel[1] += g * dt;
+            // The clamp runs before the position update, so one step can
+            // never carry a body past its contact reach.
+            if cap > 0.0 {
+                let s2 = b.vel[0] * b.vel[0] + b.vel[1] * b.vel[1] + b.vel[2] * b.vel[2];
+                let cap2 = cap * cap;
+                if s2 > cap2 {
+                    let k = cap / s2.sqrt();
+                    b.vel[0] *= k;
+                    b.vel[1] *= k;
+                    b.vel[2] *= k;
+                }
+            }
             b.pos[0] += b.vel[0] * dt;
             b.pos[1] += b.vel[1] * dt;
             b.pos[2] += b.vel[2] * dt;
@@ -142,6 +158,76 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn max_speed_caps_the_step_length() {
+        // One body crosses one cell of 0.2 at cell_size per step at most.
+        // Above the cap the motion must clip to cap * dt.
+        let mut w = World::new();
+        w.settings.gravity = 0.0;
+        w.settings.max_speed = 24.0;
+        w.bodies.push(Body {
+            pos: [0.0; 3],
+            vel: [1000.0, 0.0, 0.0],
+            radius: BODY_RADIUS,
+            shape: Shape::Sphere,
+        });
+        w.step(1.0 / 60.0);
+        let moved = w.bodies[0].pos[0];
+        assert!(
+            moved <= 24.0 / 60.0 + 1e-4,
+            "body moved past the speed cap: {moved}"
+        );
+        assert!(moved > 20.0 / 60.0, "cap behaved like a stop: {moved}");
+    }
+
+    #[test]
+    fn zero_max_speed_leaves_motion_free() {
+        // Default setting. The cap must not touch an uncapped body.
+        let mut w = World::new();
+        w.settings.gravity = 0.0;
+        w.bodies.push(Body {
+            pos: [0.0; 3],
+            vel: [1000.0, 0.0, 0.0],
+            radius: BODY_RADIUS,
+            shape: Shape::Sphere,
+        });
+        w.step(1.0 / 60.0);
+        let moved = w.bodies[0].pos[0];
+        assert!((moved - 1000.0 / 60.0).abs() < 1e-3, "free motion changed");
+    }
+
+    #[test]
+    fn pair_friction_damps_tangential_slide() {
+        // Two overlapping bodies slide past each other along x. The contact
+        // normal is vertical, so the slide is tangential. Friction must slow
+        // it; zero friction must leave it alone.
+        let slide = |friction: f32| {
+            let mut w = World::new();
+            w.settings.gravity = 0.0;
+            w.settings.pair_friction = friction;
+            w.bodies.push(Body {
+                pos: [0.0, 2.0, 0.0],
+                vel: [1.0, 0.0, 0.0],
+                radius: BODY_RADIUS,
+                shape: Shape::Sphere,
+            });
+            w.bodies.push(Body {
+                pos: [0.0, 2.05, 0.0],
+                vel: [-1.0, 0.0, 0.0],
+                radius: BODY_RADIUS,
+                shape: Shape::Sphere,
+            });
+            for _ in 0..30 {
+                w.step(1.0 / 60.0);
+            }
+            (w.bodies[0].vel[0] - w.bodies[1].vel[0]).abs()
+        };
+        let free = slide(0.0);
+        let gripped = slide(0.5);
+        assert!(free > 1.5, "frictionless slide must persist: {free}");
+        assert!(gripped < free, "friction must slow the slide: {gripped} vs {free}");
     }
 
     #[test]
