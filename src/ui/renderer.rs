@@ -28,6 +28,20 @@ const INSTANCE_SIZE: u64 = size_of::<Instance>() as u64;
 /// Size of one line vertex, in bytes.
 const LINE_VERT_SIZE: u64 = size_of::<LineVert>() as u64;
 
+/// One frame's draw inputs. The pass clears `target`, egui paints after.
+pub(crate) struct Frame<'a> {
+    pub(crate) device: &'a wgpu::Device,
+    pub(crate) queue: &'a wgpu::Queue,
+    pub(crate) encoder: &'a mut wgpu::CommandEncoder,
+    pub(crate) target: &'a wgpu::TextureView,
+    pub(crate) instances: &'a [Instance],
+    pub(crate) lines: &'a [LineVert],
+    /// Target width, in physical pixels.
+    pub(crate) w: f32,
+    /// Target height, in physical pixels.
+    pub(crate) h: f32,
+}
+
 /// Pipelines, buffers, and the uniform bind group.
 pub(crate) struct Renderer {
     /// Pipeline for one quad per instance. Triangle list, six corners.
@@ -230,21 +244,20 @@ impl Renderer {
         queue.write_buffer(buffer, 0, data);
     }
 
-    /// Records the instance pass and the line pass into `encoder`.
+    /// Records the instance pass and the line pass into the encoder.
     /// The pass clears `target` to the background color. egui paints after.
     /// Sizes are physical pixels.
-    #[expect(clippy::too_many_arguments)] // the plan fixes this draw signature
-    pub(crate) fn draw(
-        &mut self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        encoder: &mut wgpu::CommandEncoder,
-        target: &wgpu::TextureView,
-        instances: &[Instance],
-        lines: &[LineVert],
-        w: f32,
-        h: f32,
-    ) {
+    pub(crate) fn draw(&mut self, frame: Frame<'_>) {
+        let Frame {
+            device,
+            queue,
+            encoder,
+            target,
+            instances,
+            lines,
+            w,
+            h,
+        } = frame;
         let (vp_w, vp_h) = (w, h);
         let uniforms = Uniforms {
             vp_w,
@@ -375,16 +388,16 @@ mod tests {
             shape: 0.0,
             color: [1.0, 0.2, 0.1, 1.0],
         };
-        renderer.draw(
-            &device,
-            &queue,
-            &mut encoder,
-            &view,
-            &[dot],
-            &[],
-            256.0,
-            256.0,
-        );
+        renderer.draw(Frame {
+            device: &device,
+            queue: &queue,
+            encoder: &mut encoder,
+            target: &view,
+            instances: &[dot],
+            lines: &[],
+            w: 256.0,
+            h: 256.0,
+        });
         queue.submit([encoder.finish()]);
         device
             .poll(wgpu::PollType::wait_indefinitely())
