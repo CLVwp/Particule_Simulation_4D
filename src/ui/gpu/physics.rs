@@ -9,7 +9,7 @@ use std::num::NonZeroU64;
 
 use bytemuck::{Pod, Zeroable};
 
-use crate::engine::{FLOOR_Y, SimSettings};
+use crate::engine::{CONTACT_CORRECTION, CONTACT_SLOP, FLOOR_Y, SimSettings};
 
 use super::GpuBody;
 
@@ -19,11 +19,16 @@ const GPU_BODY_SIZE: u64 = size_of::<GpuBody>() as u64;
 const U32_SIZE: u64 = 4;
 /// One contact pair, in bytes: two indices and two masses.
 pub(super) const PAIR_SIZE: u64 = 16;
+/// One solve delta, in bytes: two triples and three scalars.
+pub(super) const DELTA_SIZE: u64 = 36;
+/// One cached cell, in bytes: a 16-byte-stride triple of i32.
+pub(super) const CELL_SIZE: u64 = 16;
 /// Pair slots the GPU path budgets per body, capped flat. Eight sits well
 /// above any settled pile the app spawns.
 pub(super) const PAIRS_PER_BODY: u64 = 8;
-/// Hard cap on pair slots. At 16 bytes this is 96 MB of GPU memory.
-pub(super) const PAIRS_CAP_MAX: u64 = 6_000_000;
+/// Hard cap on pair slots. The 36-byte deltas at this size stay under
+/// the 128 MiB storage binding limit.
+pub(super) const PAIRS_CAP_MAX: u64 = 3_500_000;
 
 /// One buffer layout entry for the compute stages. `uniform` picks the
 /// binding type, `min_size` pins the shader-side struct size.
@@ -79,6 +84,9 @@ fn pair_bind(
 /// Binds the grid and pair kernels: bodies, sim, table, cursor, ids, the
 /// pair CSR, and the flat pair list.
 #[expect(clippy::too_many_arguments)] // one buffer per binding, fixed by the layout
+/// Binds the grid and pair kernels: bodies, sim, table, cursor, ids, the
+/// pair CSR, the pair list, and the cell cache.
+#[expect(clippy::too_many_arguments)] // one buffer per binding, fixed by the layout
 fn grid_bind(
     device: &wgpu::Device,
     bgl: &wgpu::BindGroupLayout,
@@ -89,6 +97,7 @@ fn grid_bind(
     body_ids: &wgpu::Buffer,
     pair_start: &wgpu::Buffer,
     pairs: &wgpu::Buffer,
+    cells: &wgpu::Buffer,
 ) -> wgpu::BindGroup {
     device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("grid bind group"),
@@ -121,6 +130,65 @@ fn grid_bind(
             wgpu::BindGroupEntry {
                 binding: 6,
                 resource: buf_res(pairs),
+            },
+            wgpu::BindGroupEntry {
+                binding: 7,
+                resource: buf_res(cells),
+            },
+        ],
+    })
+}
+
+/// Binds the solve kernels: bodies, sim, pairs, the pair CSR, the deltas,
+/// and the three per-body contact lists.
+#[expect(clippy::too_many_arguments)] // one buffer per binding, fixed by the layout
+fn solve_bind(
+    device: &wgpu::Device,
+    bgl: &wgpu::BindGroupLayout,
+    bodies: &wgpu::Buffer,
+    sim: &wgpu::Buffer,
+    pairs: &wgpu::Buffer,
+    pair_start: &wgpu::Buffer,
+    deltas: &wgpu::Buffer,
+    bc_start: &wgpu::Buffer,
+    bc_cursor: &wgpu::Buffer,
+    bc_items: &wgpu::Buffer,
+) -> wgpu::BindGroup {
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("solve bind group"),
+        layout: bgl,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: buf_res(bodies),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: buf_res(sim),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: buf_res(pairs),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: buf_res(pair_start),
+            },
+            wgpu::BindGroupEntry {
+                binding: 4,
+                resource: buf_res(deltas),
+            },
+            wgpu::BindGroupEntry {
+                binding: 5,
+                resource: buf_res(bc_start),
+            },
+            wgpu::BindGroupEntry {
+                binding: 6,
+                resource: buf_res(bc_cursor),
+            },
+            wgpu::BindGroupEntry {
+                binding: 7,
+                resource: buf_res(bc_items),
             },
         ],
     })
@@ -223,8 +291,8 @@ impl SimUniforms {
             ground_friction: settings.ground_friction,
             pair_restitution: settings.pair_restitution,
             pair_friction: settings.pair_friction,
-            slop: 0.0,
-            correction: 0.0,
+            slop: CONTACT_SLOP,
+            correction: CONTACT_CORRECTION,
             max_speed: settings.max_speed,
             floor_y: FLOOR_Y,
             prune: if settings.prune_dead_pairs { 1.0 } else { 0.0 },
@@ -259,6 +327,8 @@ pub(crate) struct GpuState {
     pub(super) body_ids_capacity: u32,
     /// Layout for the five grid bindings. Kept for buffer recreation.
     pub(super) bgl_grid: wgpu::BindGroupLayout,
+    /// Layout for the solve kernels. Kept for buffer recreation.
+    pub(super) bgl_solve: wgpu::BindGroupLayout,
     pub(super) bind_grid: wgpu::BindGroup,
     pub(super) bind_scan: wgpu::BindGroup,
     /// CSR slot per body: count, then exclusive start after the scan.
@@ -269,6 +339,24 @@ pub(crate) struct GpuState {
     pub(super) pairs_capacity: u32,
     /// Scan bind group over the pair CSR instead of the grid table.
     pub(super) bind_scan_pairs: wgpu::BindGroup,
+    /// Cached cell triple per body, written by the grid scatter.
+    pub(super) cells_buf: wgpu::Buffer,
+    /// Cell slots the cache holds.
+    pub(super) cells_capacity: u32,
+    /// Per-body contact counts, then exclusive starts after the scan.
+    pub(super) bc_start_buf: wgpu::Buffer,
+    /// Per-body contact fill cursor for one frame.
+    pub(super) bc_cursor_buf: wgpu::Buffer,
+    /// Two tagged pair indices per pair, grouped per body.
+    pub(super) bc_items_buf: wgpu::Buffer,
+    /// Item slots the per-body list buffer holds.
+    pub(super) bc_items_capacity: u32,
+    /// One solve delta per pair, rewritten every round.
+    pub(super) deltas_buf: wgpu::Buffer,
+    /// Scan bind group over the per-body CSR.
+    pub(super) bind_scan_bc: wgpu::BindGroup,
+    /// Bind group for the solve kernels.
+    pub(super) bind_solve: wgpu::BindGroup,
     /// Pipelines from [`super::grid::GridKernels`].
     pub(super) kernels: super::grid::GridKernels,
 }
@@ -385,6 +473,22 @@ impl GpuState {
                 grid_entry(4, false, U32_SIZE),
                 grid_entry(5, false, U32_SIZE),
                 grid_entry(6, false, PAIR_SIZE),
+                grid_entry(7, false, CELL_SIZE),
+            ],
+        });
+        // The solve kernels get their own eight-slot layout: bodies, sim,
+        // pairs, the pair CSR, the deltas, and the three per-body lists.
+        let bgl_solve = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("solve layout"),
+            entries: &[
+                grid_entry(0, false, GPU_BODY_SIZE),
+                grid_entry(1, true, size_of::<SimUniforms>() as u64),
+                grid_entry(2, false, PAIR_SIZE),
+                grid_entry(3, false, U32_SIZE),
+                grid_entry(4, false, DELTA_SIZE),
+                grid_entry(5, false, U32_SIZE),
+                grid_entry(6, false, U32_SIZE),
+                grid_entry(7, false, U32_SIZE),
             ],
         });
         let bgl_scan = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -394,7 +498,7 @@ impl GpuState {
                 grid_entry(1, false, U32_SIZE),
             ],
         });
-        let kernels = super::grid::GridKernels::new(device, &bgl_grid, &bgl_scan);
+        let kernels = super::grid::GridKernels::new(device, &bgl_grid, &bgl_scan, &bgl_solve);
 
         // Pair pass scratch. The CSR runs over a fixed region, so the scan
         // dispatch counts stay constant; bodies past the region cannot use
@@ -415,6 +519,40 @@ impl GpuState {
                 | wgpu::BufferUsages::STORAGE,
             mapped_at_creation: false,
         });
+        let cells_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("body cells"),
+            size: CELL_SIZE,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
+        let bc_start_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("bc start"),
+            size: TABLE_SIZE as u64 * U32_SIZE,
+            usage: wgpu::BufferUsages::COPY_DST
+                | wgpu::BufferUsages::COPY_SRC
+                | wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
+        let bc_cursor_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("bc cursor"),
+            size: TABLE_SIZE as u64 * U32_SIZE,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
+        let bc_items_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("bc items"),
+            size: U32_SIZE,
+            usage: wgpu::BufferUsages::COPY_DST
+                | wgpu::BufferUsages::COPY_SRC
+                | wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
+        let deltas_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("solve deltas"),
+            size: DELTA_SIZE,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
 
         let bind_grid = grid_bind(
             device,
@@ -426,9 +564,23 @@ impl GpuState {
             &body_ids_buf,
             &pair_start_buf,
             &pairs_buf,
+            &cells_buf,
+        );
+        let bind_solve = solve_bind(
+            device,
+            &bgl_solve,
+            &bodies_buf,
+            &sim_buf,
+            &pairs_buf,
+            &pair_start_buf,
+            &deltas_buf,
+            &bc_start_buf,
+            &bc_cursor_buf,
+            &bc_items_buf,
         );
         let bind_scan = scan_bind(device, &bgl_scan, &table_buf, &aux_buf);
         let bind_scan_pairs = scan_bind(device, &bgl_scan, &pair_start_buf, &aux_buf);
+        let bind_scan_bc = scan_bind(device, &bgl_scan, &bc_start_buf, &aux_buf);
 
         GpuState {
             pipeline_integrate,
@@ -443,12 +595,22 @@ impl GpuState {
             body_ids_buf,
             body_ids_capacity: 1,
             bgl_grid,
+            bgl_solve,
             bind_grid,
             bind_scan,
             pair_start_buf,
             pairs_buf,
             pairs_capacity: 1,
             bind_scan_pairs,
+            cells_buf,
+            cells_capacity: 1,
+            bc_start_buf,
+            bc_cursor_buf,
+            bc_items_buf,
+            bc_items_capacity: 1,
+            deltas_buf,
+            bind_scan_bc,
+            bind_solve,
             kernels,
         }
     }
@@ -487,7 +649,18 @@ impl GpuState {
                 });
                 self.body_ids_capacity = bodies.len() as u32;
             }
-            // The pair budget scales with the body count, capped flat.
+            // The cell cache matches the body count one to one.
+            if bodies.len() as u64 > self.cells_capacity as u64 {
+                self.cells_buf = device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("body cells"),
+                    size: bodies.len() as u64 * CELL_SIZE,
+                    usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::STORAGE,
+                    mapped_at_creation: false,
+                });
+                self.cells_capacity = bodies.len() as u32;
+            }
+            // The pair budget scales with the body count, capped flat. The
+            // per-body lists and the deltas scale with the pair budget.
             let want_pairs = ((bodies.len() as u64) * PAIRS_PER_BODY).min(PAIRS_CAP_MAX) as u32;
             if want_pairs > self.pairs_capacity {
                 self.pairs_buf = device.create_buffer(&wgpu::BufferDescriptor {
@@ -499,6 +672,21 @@ impl GpuState {
                     mapped_at_creation: false,
                 });
                 self.pairs_capacity = want_pairs;
+                self.bc_items_buf = device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("bc items"),
+                    size: want_pairs as u64 * 2 * U32_SIZE,
+                    usage: wgpu::BufferUsages::COPY_DST
+                        | wgpu::BufferUsages::COPY_SRC
+                        | wgpu::BufferUsages::STORAGE,
+                    mapped_at_creation: false,
+                });
+                self.bc_items_capacity = want_pairs * 2;
+                self.deltas_buf = device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("solve deltas"),
+                    size: want_pairs as u64 * DELTA_SIZE,
+                    usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::STORAGE,
+                    mapped_at_creation: false,
+                });
             }
             // The old bind groups point at the dropped buffers. Rebuild.
             self.bind_group = pair_bind(device, &self.bgl, &self.bodies_buf, &self.sim_buf);
@@ -512,6 +700,19 @@ impl GpuState {
                 &self.body_ids_buf,
                 &self.pair_start_buf,
                 &self.pairs_buf,
+                &self.cells_buf,
+            );
+            self.bind_solve = solve_bind(
+                device,
+                &self.bgl_solve,
+                &self.bodies_buf,
+                &self.sim_buf,
+                &self.pairs_buf,
+                &self.pair_start_buf,
+                &self.deltas_buf,
+                &self.bc_start_buf,
+                &self.bc_cursor_buf,
+                &self.bc_items_buf,
             );
         }
         if !bodies.is_empty() {
@@ -519,31 +720,41 @@ impl GpuState {
         }
     }
 
-    /// Records the integrate pass and the floor pass. Two passes, so the
-    /// pass boundary orders the memory between the kernels.
-    pub(crate) fn record_integrate_floor(&self, encoder: &mut wgpu::CommandEncoder, n: usize) {
+    /// Records the integrate pass.
+    pub(crate) fn record_integrate(&self, encoder: &mut wgpu::CommandEncoder, n: usize) {
         if n == 0 {
             return;
         }
         let groups = (n as u32).div_ceil(WORKGROUP);
-        {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("integrate"),
-                timestamp_writes: None,
-            });
-            pass.set_pipeline(&self.pipeline_integrate);
-            pass.set_bind_group(0, &self.bind_group, &[]);
-            pass.dispatch_workgroups(groups, 1, 1);
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("integrate"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&self.pipeline_integrate);
+        pass.set_bind_group(0, &self.bind_group, &[]);
+        pass.dispatch_workgroups(groups, 1, 1);
+    }
+
+    /// Records the floor pass.
+    pub(crate) fn record_floor(&self, encoder: &mut wgpu::CommandEncoder, n: usize) {
+        if n == 0 {
+            return;
         }
-        {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("floor"),
-                timestamp_writes: None,
-            });
-            pass.set_pipeline(&self.pipeline_floor);
-            pass.set_bind_group(0, &self.bind_group, &[]);
-            pass.dispatch_workgroups(groups, 1, 1);
-        }
+        let groups = (n as u32).div_ceil(WORKGROUP);
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("floor"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&self.pipeline_floor);
+        pass.set_bind_group(0, &self.bind_group, &[]);
+        pass.dispatch_workgroups(groups, 1, 1);
+    }
+
+    /// Records the integrate pass and the floor pass. Two passes, so the
+    /// pass boundary orders the memory between the kernels.
+    pub(crate) fn record_integrate_floor(&self, encoder: &mut wgpu::CommandEncoder, n: usize) {
+        self.record_integrate(encoder, n);
+        self.record_floor(encoder, n);
     }
 
     /// Reads the bodies back. One staging buffer per call; the frame loop

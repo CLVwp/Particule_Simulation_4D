@@ -2,6 +2,10 @@
 
 /// Fraction of relative speed kept when two bodies collide.
 const PAIR_RESTITUTION: f32 = 0.6;
+/// Allowed penetration before correction pushes back.
+pub const CONTACT_SLOP: f32 = 0.001;
+/// Share of overlap removed each step.
+pub const CONTACT_CORRECTION: f32 = 0.8;
 /// Downward acceleration, in units per second squared.
 pub const GRAVITY: f32 = -9.81;
 /// Height of the floor plane.

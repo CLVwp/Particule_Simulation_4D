@@ -5,9 +5,7 @@ use rayon::prelude::*;
 use super::World;
 use super::contacts::{Contact, J_SIDE};
 use crate::engine::body::Body;
-
-const SLOP: f32 = 0.001; // allowed penetration
-const CORRECTION: f32 = 0.8; // share of overlap removed each step
+use crate::engine::config::{CONTACT_CORRECTION, CONTACT_SLOP};
 
 /// Impulse and correction data for one contact, recomputed every round.
 #[derive(Clone, Copy, Debug)]
@@ -78,7 +76,7 @@ fn contact_delta(a: &Body, b: &Body, c: &Contact, rest: f32, friction: f32) -> C
     } else {
         ([0.0; 3], 0.0)
     };
-    let push = (min_d - dist - SLOP).max(0.0) * CORRECTION / (c.mi + c.mj);
+    let push = (min_d - dist - CONTACT_SLOP).max(0.0) * CONTACT_CORRECTION / (c.mi + c.mj);
     ContactDelta {
         n,
         push,

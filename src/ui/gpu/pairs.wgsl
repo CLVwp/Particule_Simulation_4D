@@ -45,6 +45,8 @@ struct Pair {
 @group(0) @binding(4) var<storage, read_write> body_ids: array<u32>;
 @group(0) @binding(5) var<storage, read_write> pair_start: array<u32>;
 @group(0) @binding(6) var<storage, read_write> pairs: array<Pair>;
+// Cell triples written by the grid scatter this frame.
+@group(0) @binding(7) var<storage, read_write> cells: array<vec3<i32>>;
 
 // Self plus the 13 lex-positive offsets of the 27-cell neighborhood. Every
 // unordered cell pair appears exactly once, like the CPU STENCIL.
@@ -66,12 +68,6 @@ const STENCIL = array<vec3<i32>, 14>(
 );
 
 // Clamped cell coordinates. Same floor, offset, and clamp as the CPU.
-fn cell_coords(p: vec3<f32>, cell_size: f32) -> vec3<i32> {
-    let q = floor(p / cell_size);
-    let off = vec3<i32>(1 << 20);
-    return clamp(vec3<i32>(q) + off, vec3<i32>(0i), vec3<i32>((1 << 21) - 1));
-}
-
 // Murmur-style 32-bit mix of the cell triple, masked to the table.
 fn bucket_of(c: vec3<i32>, mask: u32) -> u32 {
     var h = bitcast<u32>(c.x) * 0x9E3779B1u;
@@ -116,7 +112,7 @@ fn overlaps(pi: vec3<f32>, pj: vec3<f32>, ri: f32, rj: f32) -> bool {
 // when `fill` is true, writes them at base plus k, clipped at pair_cap.
 fn walk_pairs(i: u32, base: u32, fill: bool) -> u32 {
     let body_i = bodies[i];
-    let ci = cell_coords(at(body_i), sim.cell_size);
+    let ci = cells[i];
     var k = 0u;
     for (var s = 0u; s < 14u; s = s + 1u) {
         let want = ci + STENCIL[s];
@@ -128,7 +124,7 @@ fn walk_pairs(i: u32, base: u32, fill: bool) -> u32 {
                 continue;
             }
             let body_j = bodies[j];
-            let cj = cell_coords(at(body_j), sim.cell_size);
+            let cj = cells[j];
             // Exact cell check: bucket collisions end here.
             if (cj.x != want.x || cj.y != want.y || cj.z != want.z) {
                 continue;

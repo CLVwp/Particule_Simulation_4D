@@ -38,6 +38,8 @@ struct Sim {
 @group(0) @binding(2) var<storage, read_write> table: array<atomic<u32>>;
 @group(0) @binding(3) var<storage, read_write> cursor: array<atomic<u32>>;
 @group(0) @binding(4) var<storage, read_write> body_ids: array<u32>;
+// Cell triple per body, cached for the pair and solve passes.
+@group(0) @binding(7) var<storage, read_write> cells: array<vec3<i32>>;
 
 // Clamped cell coordinates: the same floor, offset, and clamp as the CPU
 // `key_part`. One axis spans 21 bits, so cells reach +/-1M.
@@ -83,9 +85,11 @@ fn grid_scatter(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (i >= sim.n) {
         return;
     }
-    let b = bucket_of(cell_coords(at(bodies[i]), sim.cell_size), sim.table_mask);
+    let c = cell_coords(at(bodies[i]), sim.cell_size);
+    let b = bucket_of(c, sim.table_mask);
     let slot = atomicLoad(&table[b]) + atomicAdd(&cursor[b], 1u);
     body_ids[slot] = i;
+    cells[i] = c;
 }
 
 // One thread per bucket. Insertion sort by body index, ascending. Bucket

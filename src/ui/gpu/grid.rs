@@ -17,6 +17,11 @@ pub(crate) struct GridKernels {
     pub(super) scan_apply: wgpu::ComputePipeline,
     pub(super) pair_count: wgpu::ComputePipeline,
     pub(super) pair_fill: wgpu::ComputePipeline,
+    pub(super) solve_count: wgpu::ComputePipeline,
+    pub(super) solve_fill: wgpu::ComputePipeline,
+    pub(super) solve_sort: wgpu::ComputePipeline,
+    pub(super) solve_delta: wgpu::ComputePipeline,
+    pub(super) solve_apply: wgpu::ComputePipeline,
 }
 
 impl GridKernels {
@@ -26,6 +31,7 @@ impl GridKernels {
         device: &wgpu::Device,
         bgl_grid: &wgpu::BindGroupLayout,
         bgl_scan: &wgpu::BindGroupLayout,
+        bgl_solve: &wgpu::BindGroupLayout,
     ) -> Self {
         let grid_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("grid.wgsl"),
@@ -39,6 +45,10 @@ impl GridKernels {
             label: Some("pairs.wgsl"),
             source: wgpu::ShaderSource::Wgsl(include_str!("pairs.wgsl").into()),
         });
+        let solve_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("solve.wgsl"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("solve.wgsl").into()),
+        });
         let layout = |label: &'static str, bgl: &wgpu::BindGroupLayout| {
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some(label),
@@ -48,6 +58,7 @@ impl GridKernels {
         };
         let grid_layout = layout("grid pipeline layout", bgl_grid);
         let scan_layout = layout("scan pipeline layout", bgl_scan);
+        let solve_layout = layout("solve pipeline layout", bgl_solve);
         let kernel = |label: &'static str,
                       entry: &'static str,
                       module: &wgpu::ShaderModule,
@@ -75,6 +86,11 @@ impl GridKernels {
             scan_apply: kernel("scan apply", "scan_apply", &scan_shader, &scan_layout),
             pair_count: kernel("pair count", "pair_count", &pairs_shader, &grid_layout),
             pair_fill: kernel("pair fill", "pair_fill", &pairs_shader, &grid_layout),
+            solve_count: kernel("solve count", "solve_count", &solve_shader, &solve_layout),
+            solve_fill: kernel("solve fill", "solve_fill", &solve_shader, &solve_layout),
+            solve_sort: kernel("solve sort", "solve_sort", &solve_shader, &solve_layout),
+            solve_delta: kernel("solve delta", "solve_delta", &solve_shader, &solve_layout),
+            solve_apply: kernel("solve apply", "solve_apply", &solve_shader, &solve_layout),
         }
     }
 }

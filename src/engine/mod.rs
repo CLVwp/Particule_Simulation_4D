@@ -11,5 +11,5 @@ mod rng;
 mod world;
 
 pub use body::{Body, Shape};
-pub use config::{BODY_RADIUS, FLOOR_Y, MIN_RADIUS, SimSettings};
+pub use config::{BODY_RADIUS, CONTACT_CORRECTION, CONTACT_SLOP, FLOOR_Y, MIN_RADIUS, SimSettings};
 pub use world::{World, thread_count};

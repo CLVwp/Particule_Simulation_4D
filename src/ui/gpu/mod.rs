@@ -16,6 +16,8 @@ mod grid;
 mod pairs;
 #[cfg(test)]
 mod physics;
+#[cfg(test)]
+mod solve;
 
 /// Builds one offscreen device for the GPU test modules. Returns `None`
 /// without an adapter, so machines without Vulkan or DirectX skip.
