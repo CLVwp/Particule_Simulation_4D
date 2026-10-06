@@ -7,6 +7,14 @@ use super::{Instance, NEAR, SceneOut, TileCache, TileMerge, Tuning};
 use crate::ui::camera::Camera;
 use crate::ui::theme::hsla_to_rgba;
 
+/// Hue of sphere bodies, in turns.
+pub(crate) const SPHERE_HUE: f32 = 0.53;
+/// Hue of cube bodies, in turns.
+pub(crate) const CUBE_HUE: f32 = 0.08;
+/// Saturation of the body colors.
+pub(crate) const BODY_SAT: f32 = 0.9;
+/// Lightness of the body colors.
+pub(crate) const BODY_LIGHT: f32 = 0.6;
 /// Bodies below this screen radius merge into tiles. Bigger bodies paint alone.
 pub(crate) const MERGE_RADIUS_PX: f32 = 3.0;
 /// Side length of one merge tile, in screen pixels.
@@ -159,7 +167,12 @@ pub(crate) fn emit_bodies(
             y: p.y,
             radius: p.radius_px,
             shape: if sphere { 0.0 } else { 1.0 },
-            color: hsla_to_rgba(if sphere { 0.53 } else { 0.08 }, 0.9, 0.6, alpha),
+            color: hsla_to_rgba(
+                if sphere { SPHERE_HUE } else { CUBE_HUE },
+                BODY_SAT,
+                BODY_LIGHT,
+                alpha,
+            ),
         });
     }
 }

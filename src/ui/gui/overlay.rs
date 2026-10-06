@@ -26,6 +26,7 @@ pub(crate) fn overlay(ctx: &Context, app: &mut App, scene: &SceneOut) {
     let p = app.world.phase_ms;
     let step_total: f32 = p.iter().sum();
     let par_min = app.world.settings.par_min;
+    let gpu_render = app.mode == PhysicsMode::Newton && app.tuning.gpu_render;
     let path = if app.mode == PhysicsMode::Fluid {
         format!("fluid grid {} x {}", app.fluid.n, app.fluid.n)
     } else if app.world.bodies.len() >= par_min {
@@ -74,7 +75,17 @@ pub(crate) fn overlay(ctx: &Context, app: &mut App, scene: &SceneOut) {
                         }
                         head(ui, "GPU");
                         line(ui, format!("viewport {w:.0} x {h:.0} px"));
-                        line(ui, format!("instances painted {}", scene.instances.len()));
+                        if gpu_render {
+                            line(
+                                ui,
+                                format!(
+                                    "bodies drawn {} (vertex pull, merge off)",
+                                    app.world.bodies.len()
+                                ),
+                            );
+                        } else {
+                            line(ui, format!("instances painted {}", scene.instances.len()));
+                        }
                         line(ui, format!("scene (project + sort) {:.3} ms", app.scene_ms));
                         line(ui, format!("adapter: {}", app.adapter_info));
                         head(ui, "Memory");
@@ -103,31 +114,36 @@ pub(crate) fn overlay(ctx: &Context, app: &mut App, scene: &SceneOut) {
 /// stats above answer the "did it help" question at a glance.
 fn tuning_panel(ui: &mut Ui, app: &mut App) {
     head(ui, "Tuning");
-    ui.checkbox(&mut app.tuning.lod_merge, "Tile merge (LOD)");
-    ui.add_enabled_ui(app.tuning.lod_merge, |ui| {
-        slider_row(
-            ui,
-            "merge px",
-            &mut app.tuning.merge_radius_px,
-            1.5..=8.0,
-            0.5,
-        );
-        slider_row(
-            ui,
-            "tile px",
-            &mut app.tuning.merge_tile_px,
-            4.0..=32.0,
-            1.0,
-        );
-        slider_row(
-            ui,
-            "tile fill",
-            &mut app.tuning.merge_tile_fill,
-            0.5..=1.0,
-            0.05,
-        );
+    ui.checkbox(&mut app.tuning.gpu_render, "GPU vertex pull");
+    // The vertex-pull path skips the CPU scene build, so these knobs do
+    // nothing while it runs. Grey them out.
+    ui.add_enabled_ui(!app.tuning.gpu_render, |ui| {
+        ui.checkbox(&mut app.tuning.lod_merge, "Tile merge (LOD)");
+        ui.add_enabled_ui(app.tuning.lod_merge, |ui| {
+            slider_row(
+                ui,
+                "merge px",
+                &mut app.tuning.merge_radius_px,
+                1.5..=8.0,
+                0.5,
+            );
+            slider_row(
+                ui,
+                "tile px",
+                &mut app.tuning.merge_tile_px,
+                4.0..=32.0,
+                1.0,
+            );
+            slider_row(
+                ui,
+                "tile fill",
+                &mut app.tuning.merge_tile_fill,
+                0.5..=1.0,
+                0.05,
+            );
+        });
+        ui.checkbox(&mut app.tuning.cull_offscreen, "Off-screen cull");
     });
-    ui.checkbox(&mut app.tuning.cull_offscreen, "Off-screen cull");
     slider_row(
         ui,
         "fluid cutoff",

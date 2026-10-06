@@ -2,6 +2,7 @@
 
 pub(crate) mod app;
 pub(crate) mod camera;
+pub(crate) mod gpu;
 pub(crate) mod gui;
 pub(crate) mod input;
 pub(crate) mod renderer;

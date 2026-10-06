@@ -4,7 +4,9 @@ use std::mem::size_of;
 use std::num::NonZeroU64;
 
 use bytemuck::{Pod, Zeroable};
+use particule_simulation_4d::engine::Body;
 
+use crate::ui::gpu::{CamUniforms, GpuBody};
 use crate::ui::scene::{Instance, LineVert};
 use crate::ui::theme::BG;
 
@@ -27,6 +29,8 @@ const _: () = assert!(size_of::<Uniforms>() == 16);
 const INSTANCE_SIZE: u64 = size_of::<Instance>() as u64;
 /// Size of one line vertex, in bytes.
 const LINE_VERT_SIZE: u64 = size_of::<LineVert>() as u64;
+/// Size of one GPU body, in bytes.
+const GPU_BODY_SIZE: u64 = size_of::<GpuBody>() as u64;
 
 /// One frame's draw inputs. The pass clears `target`, egui paints after.
 pub(crate) struct Frame<'a> {
@@ -34,6 +38,8 @@ pub(crate) struct Frame<'a> {
     pub(crate) queue: &'a wgpu::Queue,
     pub(crate) encoder: &'a mut wgpu::CommandEncoder,
     pub(crate) target: &'a wgpu::TextureView,
+    /// Draw bodies from the GPU storage buffer instead of the instances.
+    pub(crate) bodies_gpu: bool,
     pub(crate) instances: &'a [Instance],
     pub(crate) lines: &'a [LineVert],
     /// Target width, in physical pixels.
@@ -46,6 +52,8 @@ pub(crate) struct Frame<'a> {
 pub(crate) struct Renderer {
     /// Pipeline for one quad per instance. Triangle list, six corners.
     pipeline_instances: wgpu::RenderPipeline,
+    /// Pipeline for one quad per body, read from the storage buffer.
+    pipeline_bodies: wgpu::RenderPipeline,
     /// Pipeline for flat colored line segments.
     pipeline_lines: wgpu::RenderPipeline,
     /// Shared uniform bind group. Both pipelines use group 0.
@@ -60,6 +68,20 @@ pub(crate) struct Renderer {
     line_buf: wgpu::Buffer,
     /// Line vertices the line buffer holds.
     line_capacity: u32,
+    /// Layout for the vertex-pull bind group. Kept for buffer recreation.
+    bgl_bodies: wgpu::BindGroupLayout,
+    /// Camera uniform for the vertex-pull path. Written once per frame.
+    cam_buf: wgpu::Buffer,
+    /// GPU body storage. Grown only when a frame needs more space.
+    bodies_buf: wgpu::Buffer,
+    /// Body slots the storage buffer holds.
+    bodies_capacity: u32,
+    /// Bodies the last upload stored. Zero until the first upload.
+    bodies_uploaded: u32,
+    /// Bind group for the camera uniform and the body storage.
+    bind_group_bodies: wgpu::BindGroup,
+    /// Reused mirror of the body list. Filled by [`Self::upload_bodies`].
+    gpu_scratch: Vec<GpuBody>,
 }
 
 impl Renderer {
@@ -124,6 +146,69 @@ impl Renderer {
                 entry_point: Some("vs_main"),
                 compilation_options: Default::default(),
                 buffers: &[Some(instance_layout)],
+            },
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
+                targets: &targets,
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+
+        // One quad per body, read from storage. No vertex buffers: the
+        // body index comes from the instance index.
+        let bodies_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("bodies.wgsl"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("bodies.wgsl").into()),
+        });
+        let bgl_bodies = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("bodies layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: Some(
+                            NonZeroU64::new(size_of::<CamUniforms>() as u64)
+                                .expect("uniform size is not zero"),
+                        ),
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: Some(
+                            NonZeroU64::new(GPU_BODY_SIZE).expect("body size is not zero"),
+                        ),
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let layout_bodies = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("bodies layout"),
+            bind_group_layouts: &[Some(&bgl_bodies)],
+            immediate_size: 0,
+        });
+        let pipeline_bodies = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("bodies vertex pull"),
+            layout: Some(&layout_bodies),
+            vertex: wgpu::VertexState {
+                module: &bodies_shader,
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                buffers: &[],
             },
             primitive: wgpu::PrimitiveState::default(),
             depth_stencil: None,
@@ -208,9 +293,45 @@ impl Renderer {
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::VERTEX,
             mapped_at_creation: false,
         });
+        let cam_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("camera uniform"),
+            size: size_of::<CamUniforms>() as u64,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::UNIFORM,
+            mapped_at_creation: false,
+        });
+        // Seed the storage with one slot. The upload grows it on demand.
+        let bodies_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("gpu bodies"),
+            size: GPU_BODY_SIZE,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
+        let bind_group_bodies = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("bodies bind group"),
+            layout: &bgl_bodies,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                        buffer: &cam_buf,
+                        offset: 0,
+                        size: None,
+                    }),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                        buffer: &bodies_buf,
+                        offset: 0,
+                        size: None,
+                    }),
+                },
+            ],
+        });
 
         Self {
             pipeline_instances,
+            pipeline_bodies,
             pipeline_lines,
             bind_group,
             uniform_buf,
@@ -218,6 +339,65 @@ impl Renderer {
             instance_capacity: 1,
             line_buf,
             line_capacity: 1,
+            bgl_bodies,
+            cam_buf,
+            bodies_buf,
+            bodies_capacity: 1,
+            bodies_uploaded: 0,
+            bind_group_bodies,
+            gpu_scratch: Vec::new(),
+        }
+    }
+
+    /// Uploads the camera uniform and the body storage for the vertex-pull
+    /// path. The CPU stays authoritative: bodies move every step, so both
+    /// buffers rewrite every frame. The storage grows only when needed.
+    pub(crate) fn upload_bodies(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        cam: &CamUniforms,
+        bodies: &[Body],
+    ) {
+        queue.write_buffer(&self.cam_buf, 0, bytemuck::bytes_of(cam));
+        self.gpu_scratch.clear();
+        self.gpu_scratch
+            .extend(bodies.iter().map(GpuBody::from_body));
+        self.bodies_uploaded = self.gpu_scratch.len() as u32;
+        if self.gpu_scratch.len() as u64 > self.bodies_capacity as u64 {
+            self.bodies_buf = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("gpu bodies"),
+                size: self.gpu_scratch.len() as u64 * GPU_BODY_SIZE,
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::STORAGE,
+                mapped_at_creation: false,
+            });
+            self.bodies_capacity = self.gpu_scratch.len() as u32;
+            // The old bind group points at the dropped buffer. Rebuild it.
+            self.bind_group_bodies = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("bodies bind group"),
+                layout: &self.bgl_bodies,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                            buffer: &self.cam_buf,
+                            offset: 0,
+                            size: None,
+                        }),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                            buffer: &self.bodies_buf,
+                            offset: 0,
+                            size: None,
+                        }),
+                    },
+                ],
+            });
+        }
+        if !self.gpu_scratch.is_empty() {
+            queue.write_buffer(&self.bodies_buf, 0, bytemuck::cast_slice(&self.gpu_scratch));
         }
     }
 
@@ -253,6 +433,7 @@ impl Renderer {
             queue,
             encoder,
             target,
+            bodies_gpu,
             instances,
             lines,
             w,
@@ -313,7 +494,13 @@ impl Renderer {
             multiview_mask: None,
         });
 
-        if !instances.is_empty() {
+        if bodies_gpu && self.bodies_uploaded > 0 {
+            pass.set_pipeline(&self.pipeline_bodies);
+            pass.set_bind_group(0, &self.bind_group_bodies, &[]);
+            // Six corners per quad come from vertex_index, one body per
+            // instance comes from instance_index. No vertex buffers.
+            pass.draw(0..6, 0..self.bodies_uploaded);
+        } else if !instances.is_empty() {
             pass.set_pipeline(&self.pipeline_instances);
             pass.set_bind_group(0, &self.bind_group, &[]);
             pass.set_vertex_buffer(0, self.instance_buf.slice(..));
@@ -333,12 +520,12 @@ impl Renderer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ui::camera::Camera;
     use crate::ui::scene::Instance;
+    use particule_simulation_4d::engine::Shape;
 
-    /// Builds the renderer and draws one instance offscreen.
-    /// Skips when the machine has no wgpu adapter.
-    #[test]
-    fn offscreen_draw_passes() {
+    /// Builds one offscreen device. Returns `None` without an adapter.
+    fn headless_device() -> Option<(wgpu::Device, wgpu::Queue)> {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::all(),
             ..wgpu::InstanceDescriptor::new_without_display_handle()
@@ -346,23 +533,23 @@ mod tests {
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::HighPerformance,
             ..Default::default()
-        }));
-        let Ok(adapter) = adapter else {
-            eprintln!("no wgpu adapter; skipping");
-            return;
-        };
-        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-            label: None,
-            required_features: wgpu::Features::default(),
-            required_limits: wgpu::Limits::default(),
-            experimental_features: wgpu::ExperimentalFeatures::disabled(),
-            memory_hints: wgpu::MemoryHints::default(),
-            trace: wgpu::Trace::Off,
         }))
-        .expect("device request fails");
+        .ok()?;
+        Some(
+            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+                label: None,
+                required_features: wgpu::Features::default(),
+                required_limits: wgpu::Limits::default(),
+                experimental_features: wgpu::ExperimentalFeatures::disabled(),
+                memory_hints: wgpu::MemoryHints::default(),
+                trace: wgpu::Trace::Off,
+            }))
+            .expect("device request fails"),
+        )
+    }
 
-        let mut renderer = Renderer::new(&device, wgpu::TextureFormat::Bgra8Unorm);
-
+    /// Builds one 256 by 256 render target view.
+    fn test_target(device: &wgpu::Device) -> wgpu::TextureView {
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("test target"),
             size: wgpu::Extent3d {
@@ -377,7 +564,19 @@ mod tests {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             view_formats: &[],
         });
-        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        texture.create_view(&wgpu::TextureViewDescriptor::default())
+    }
+
+    /// Builds the renderer and draws one instance offscreen.
+    /// Skips when the machine has no wgpu adapter.
+    #[test]
+    fn offscreen_draw_passes() {
+        let Some((device, queue)) = headless_device() else {
+            eprintln!("no wgpu adapter; skipping");
+            return;
+        };
+        let mut renderer = Renderer::new(&device, wgpu::TextureFormat::Bgra8Unorm);
+        let view = test_target(&device);
 
         let mut encoder =
             device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
@@ -393,7 +592,58 @@ mod tests {
             queue: &queue,
             encoder: &mut encoder,
             target: &view,
+            bodies_gpu: false,
             instances: &[dot],
+            lines: &[],
+            w: 256.0,
+            h: 256.0,
+        });
+        queue.submit([encoder.finish()]);
+        device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("poll fails");
+    }
+
+    /// Uploads two bodies and draws them through the storage buffer.
+    /// Skips when the machine has no wgpu adapter.
+    #[test]
+    fn offscreen_gpu_bodies_draw_passes() {
+        let Some((device, queue)) = headless_device() else {
+            eprintln!("no wgpu adapter; skipping");
+            return;
+        };
+        let mut renderer = Renderer::new(&device, wgpu::TextureFormat::Bgra8Unorm);
+        let view = test_target(&device);
+
+        let cam = Camera {
+            target: [0.0; 3],
+            yaw: 0.0,
+            pitch: 0.0,
+            dist: 12.0,
+        };
+        let cam_uniforms = CamUniforms::new(&cam, 256.0, 256.0);
+        let sphere = Body {
+            pos: [0.0, 0.0, 0.0],
+            vel: [0.0; 3],
+            radius: 0.1,
+            shape: Shape::Sphere,
+        };
+        let cube = Body {
+            pos: [0.5, 0.0, 0.0],
+            shape: Shape::Cube,
+            ..sphere
+        };
+
+        renderer.upload_bodies(&device, &queue, &cam_uniforms, &[sphere, cube]);
+        let mut encoder =
+            device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        renderer.draw(Frame {
+            device: &device,
+            queue: &queue,
+            encoder: &mut encoder,
+            target: &view,
+            bodies_gpu: true,
+            instances: &[],
             lines: &[],
             w: 256.0,
             h: 256.0,

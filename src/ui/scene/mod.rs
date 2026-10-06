@@ -13,11 +13,14 @@ mod fluid;
 mod lines;
 
 use self::bodies::{MERGE_RADIUS_PX, MERGE_TILE_FILL, MERGE_TILE_PX, emit_bodies};
+
+/// Body colors shared with the GPU vertex-pull path.
+pub(crate) use self::bodies::{BODY_LIGHT, BODY_SAT, CUBE_HUE, SPHERE_HUE};
 use self::fluid::emit_fluid;
 use self::lines::emit_lines;
 
 /// Depths at or below this sit at or behind the camera.
-const NEAR: f32 = 0.5;
+pub(crate) const NEAR: f32 = 0.5;
 /// Cells at or below this density do not draw.
 pub(crate) const DENSITY_CUTOFF: f32 = 0.02;
 
@@ -110,6 +113,8 @@ pub(crate) struct Tuning {
     pub(crate) cull_offscreen: bool,
     /// Fluid cells at or below this density do not draw.
     pub(crate) density_cutoff: f32,
+    /// Draw bodies straight from the GPU storage buffer.
+    pub(crate) gpu_render: bool,
 }
 
 impl Default for Tuning {
@@ -121,6 +126,7 @@ impl Default for Tuning {
             merge_tile_fill: MERGE_TILE_FILL,
             cull_offscreen: true,
             density_cutoff: DENSITY_CUTOFF,
+            gpu_render: true,
         }
     }
 }
@@ -138,17 +144,21 @@ impl App {
         // One law set fills the instance stream. Grid and axes always draw.
         match self.mode {
             PhysicsMode::Newton => {
-                emit_bodies(
-                    &self.cam,
-                    &self.world.bodies,
-                    w,
-                    h,
-                    dist,
-                    &self.tuning,
-                    par_min,
-                    &mut self.tiles,
-                    out,
-                );
+                // The GPU path draws bodies straight from the storage
+                // buffer. The CPU instance stream stays empty.
+                if !self.tuning.gpu_render {
+                    emit_bodies(
+                        &self.cam,
+                        &self.world.bodies,
+                        w,
+                        h,
+                        dist,
+                        &self.tuning,
+                        par_min,
+                        &mut self.tiles,
+                        out,
+                    );
+                }
             }
             PhysicsMode::Fluid => emit_fluid(
                 &self.cam,

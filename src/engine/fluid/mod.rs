@@ -7,6 +7,8 @@ mod bounds;
 mod emitter;
 mod solver;
 
+use std::time::Instant;
+
 use bounds::Bnd;
 use solver::{advect, lin_solve};
 
@@ -36,6 +38,9 @@ pub struct Fluid {
     u0: Vec<f32>,
     v0: Vec<f32>,
     dens0: Vec<f32>,
+    /// Wall time of the last step per phase, in ms:
+    /// emit, buoyancy, velocity, density. Read by the debug overlay.
+    pub phase_ms: [f32; 4],
 }
 
 impl Fluid {
@@ -58,15 +63,40 @@ impl Fluid {
             u0: vec![0.0; size],
             v0: vec![0.0; size],
             dens0: vec![0.0; size],
+            phase_ms: [0.0; 4],
         }
     }
 
-    /// One simulation step.
+    /// One simulation step. Fills `phase_ms` per phase.
     pub fn step(&mut self, dt: f32) {
+        let t = Instant::now();
         self.emit_density();
+        self.phase_ms[0] = ms_since(t);
+        let t = Instant::now();
         self.buoyancy(dt);
+        self.phase_ms[1] = ms_since(t);
+        let t = Instant::now();
         self.vel_step(dt);
+        self.phase_ms[2] = ms_since(t);
+        let t = Instant::now();
         self.dens_step(dt);
+        self.phase_ms[3] = ms_since(t);
+    }
+
+    /// Zeroes every cell field and the phase timers. Keeps the arrays and the
+    /// tuning fields: viscosity, diffusion, and emit stay as set.
+    pub fn clear(&mut self) {
+        for a in [
+            &mut self.u,
+            &mut self.v,
+            &mut self.dens,
+            &mut self.u0,
+            &mut self.v0,
+            &mut self.dens0,
+        ] {
+            a.fill(0.0);
+        }
+        self.phase_ms = [0.0; 4];
     }
 
     /// Dense cells rise: the buoyancy term of Navier-Stokes.
@@ -131,6 +161,11 @@ fn ix(i: usize, j: usize, n: usize) -> usize {
     i + (n + 2) * j
 }
 
+/// Wall time since `t`, in milliseconds.
+fn ms_since(t: Instant) -> f32 {
+    t.elapsed().as_secs_f32() * 1000.0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -140,6 +175,19 @@ mod tests {
         // n = 1 puts the emitter range at the array edge.
         let mut f = Fluid::new(1);
         f.step(1.0 / 60.0);
+    }
+
+    #[test]
+    fn clear_empties_the_grid() {
+        let mut f = Fluid::new(16);
+        f.emit = 1.0;
+        for _ in 0..30 {
+            f.step(1.0 / 60.0);
+        }
+        assert!(f.dens.iter().any(|&d| d > 0.0), "emitter lit nothing");
+        f.clear();
+        assert!(f.dens.iter().all(|&d| d == 0.0), "density survived clear");
+        assert!(f.u.iter().all(|&x| x == 0.0), "velocity survived clear");
     }
 
     #[test]

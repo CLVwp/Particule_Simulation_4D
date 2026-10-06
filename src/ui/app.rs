@@ -9,10 +9,11 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::Key;
 use winit::window::{Window, WindowId};
 
-use crate::ui::App;
+use crate::ui::gpu::CamUniforms;
 use crate::ui::input::{Drag, apply_drag, zoom};
 use crate::ui::renderer::{Frame, Renderer};
 use crate::ui::scene::SceneOut;
+use crate::ui::{App, PhysicsMode};
 
 /// Title of the app window.
 const WINDOW_TITLE: &str = "Particule Simulation 4D";
@@ -209,12 +210,26 @@ impl WindowState {
             }
         }
 
+        // The vertex-pull path uploads the bodies it draws. The camera moves
+        // every frame, so the uniform rewrites every frame with it.
+        let gpu_render = app.mode == PhysicsMode::Newton && app.tuning.gpu_render;
+        if gpu_render {
+            let cam_uniforms = CamUniforms::new(&app.cam, w, h);
+            self.renderer.upload_bodies(
+                &self.device,
+                &self.queue,
+                &cam_uniforms,
+                &app.world.bodies,
+            );
+        }
+
         // The particles and lines clear the target.
         self.renderer.draw(Frame {
             device: &self.device,
             queue: &self.queue,
             encoder: &mut encoder,
             target: &view,
+            bodies_gpu: gpu_render,
             instances: &self.scene.instances,
             lines: &self.scene.lines,
             w: self.size.0 as f32,
