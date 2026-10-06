@@ -11,7 +11,7 @@ use winit::window::{Window, WindowId};
 
 use crate::ui::App;
 use crate::ui::input::{Drag, apply_drag, zoom};
-use crate::ui::renderer::Renderer;
+use crate::ui::renderer::{Frame, Renderer};
 use crate::ui::scene::SceneOut;
 
 /// Title of the app window.
@@ -180,10 +180,9 @@ impl WindowState {
         self.egui
             .handle_platform_output(&self.window, output.platform_output);
 
-        let (w, h) = (
-            self.size.0 as f32 / output.pixels_per_point,
-            self.size.1 as f32 / output.pixels_per_point,
-        );
+        // The scene build works in physical pixels. The shader converts with
+        // the same size, so the scaling factor cancels at every DPI.
+        let (w, h) = (self.size.0 as f32, self.size.1 as f32);
         app.build_scene(w, h, &mut self.scene);
 
         let paint_jobs = ctx.tessellate(output.shapes, output.pixels_per_point);
@@ -211,16 +210,16 @@ impl WindowState {
         }
 
         // The particles and lines clear the target.
-        self.renderer.draw(
-            &self.device,
-            &self.queue,
-            &mut encoder,
-            &view,
-            &self.scene.instances,
-            &self.scene.lines,
-            self.size.0 as f32,
-            self.size.1 as f32,
-        );
+        self.renderer.draw(Frame {
+            device: &self.device,
+            queue: &self.queue,
+            encoder: &mut encoder,
+            target: &view,
+            instances: &self.scene.instances,
+            lines: &self.scene.lines,
+            w: self.size.0 as f32,
+            h: self.size.1 as f32,
+        });
 
         // egui paints over the particles with a load pass.
         self.egui_paint.update_buffers(
@@ -295,6 +294,13 @@ impl ApplicationHandler for Handler {
             WindowEvent::Resized(size) => state.resize(size),
             WindowEvent::RedrawRequested => state.redraw(app),
             WindowEvent::ModifiersChanged(mods) => state.shift = mods.state().shift_key(),
+            // Focus loss hides the key release. Drop the held keys, or the
+            // camera keeps sliding after alt-tab.
+            WindowEvent::Focused(false) => {
+                app.input.keys.clear();
+                app.drag = None;
+                state.shift = false;
+            }
             WindowEvent::KeyboardInput {
                 event:
                     KeyEvent {
@@ -358,7 +364,8 @@ impl ApplicationHandler for Handler {
                 }
                 app.last_mouse = Some(pos);
             }
-            WindowEvent::MouseWheel { delta, .. } => {
+            // egui marks the wheel consumed over its scroll areas.
+            WindowEvent::MouseWheel { delta, .. } if !response.consumed => {
                 let dy = match delta {
                     MouseScrollDelta::LineDelta(_, y) => y,
                     MouseScrollDelta::PixelDelta(pixels) => (pixels.y / 20.0) as f32,
