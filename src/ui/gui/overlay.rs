@@ -25,14 +25,21 @@ pub(crate) fn overlay(ctx: &Context, app: &mut App, scene: &SceneOut) {
     let scale = ctx.pixels_per_point();
     let (w, h) = (view.width() * scale, view.height() * scale);
     // One law set fills the phase table. The rows switch with the mode.
-    let (names, p): (&[&str], &[f32]) = match app.mode {
+    // The timers copy out, so the mutable pass below can borrow `app`.
+    let (names, p): (&[&str], [f32; 5]) = match app.mode {
         PhysicsMode::Newton => (
             &["integrate", "grid", "contacts", "resolve", "floor"],
-            &app.world.phase_ms,
+            app.world.phase_ms,
         ),
         PhysicsMode::Fluid => (
             &["emit", "buoyancy", "velocity", "density"],
-            &app.fluid.phase_ms,
+            [
+                app.fluid.phase_ms[0],
+                app.fluid.phase_ms[1],
+                app.fluid.phase_ms[2],
+                app.fluid.phase_ms[3],
+                0.0,
+            ],
         ),
     };
     let step_total: f32 = p.iter().sum();

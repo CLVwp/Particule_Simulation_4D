@@ -219,13 +219,8 @@ impl App {
                 // Seed zero keeps the auto stream, which derives from the
                 // count alone. Any other value replays the same cloud.
                 if self.spawn_seed == 0 {
-                    self.world.spawn(
-                        n,
-                        SPAWN_ORIGIN,
-                        self.spawn_speed,
-                        self.spawn_shape,
-                        radius,
-                    );
+                    self.world
+                        .spawn(n, SPAWN_ORIGIN, self.spawn_speed, self.spawn_shape, radius);
                 } else {
                     self.world.spawn_seeded(
                         n,
@@ -239,13 +234,8 @@ impl App {
             }
             SpawnLayout::Lattice => {
                 let side = ((n as f32).cbrt().round() as usize).max(1);
-                self.world.spawn_grid(
-                    side,
-                    SPAWN_ORIGIN,
-                    2.0 * radius,
-                    self.spawn_shape,
-                    radius,
-                );
+                self.world
+                    .spawn_grid(side, SPAWN_ORIGIN, 2.0 * radius, self.spawn_shape, radius);
             }
         }
     }

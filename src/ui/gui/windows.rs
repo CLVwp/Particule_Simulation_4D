@@ -75,13 +75,7 @@ pub(crate) fn physics_window(ctx: &Context, app: &mut App, below: f32) {
                 );
             });
             ui.end_row();
-            grid_slider(
-                ui,
-                "Time scale",
-                &mut app.time_scale,
-                0.1..=4.0,
-                0.1,
-            );
+            grid_slider(ui, "Time scale", &mut app.time_scale, 0.1..=4.0, 0.1);
             match app.mode {
                 PhysicsMode::Newton => {
                     grid_slider(
