@@ -9,6 +9,12 @@ After the 2026-10-06 wave (settled pile, `cargo run --release
 grid 2.97 ms, resolve 2.18 ms. The phase table example reproduces the
 F1 table headless. Use it before and after every change.
 
+In-app F1 at 500k, sparse scene (19 893 contacts): frame 19.0 ms,
+step 7.747 ms. contacts 3.967 ms, grid 3.127 ms, resolve 0.683 ms.
+scene 7.565 ms — about 40 % of the frame. The frame is render-bound
+again. The GPU storage buffer item now leads, and grid work beats
+body sleep at this contact count.
+
 Tags: `[algo]` algorithm, `[par]` parallelism, `[arch]` architecture,
 `[visual]` visual shortcut.
 
