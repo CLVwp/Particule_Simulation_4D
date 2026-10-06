@@ -93,6 +93,42 @@ impl World {
         }
     }
 
+    /// Spawns exactly `n` bodies on a lattice with no velocity. The top
+    /// layer stays partial when `n` is not a perfect cube. Same order as
+    /// [`World::spawn_grid`]: x fastest, z slowest. `spacing` sets the
+    /// lattice step; at or above `2 * radius` the pile starts out of
+    /// overlap. No randomness: identical calls build identical piles.
+    pub fn spawn_lattice(
+        &mut self,
+        n: usize,
+        origin: [f32; 3],
+        spacing: f32,
+        shape: Shape,
+        radius: f32,
+    ) {
+        let radius = radius.max(MIN_RADIUS);
+        self.cell_size = self.cell_size.max(2.0 * radius);
+        // Guards the `as u32` body-index casts in the scan.
+        debug_assert!(n <= u32::MAX as usize);
+        let side = ((n as f32).cbrt().ceil() as usize).max(1);
+        self.bodies.reserve(n);
+        for idx in 0..n {
+            let i = idx % side;
+            let j = (idx / side) % side;
+            let k = idx / (side * side);
+            self.bodies.push(Body {
+                pos: [
+                    origin[0] + i as f32 * spacing,
+                    origin[1] + j as f32 * spacing,
+                    origin[2] + k as f32 * spacing,
+                ],
+                vel: [0.0; 3],
+                radius,
+                shape,
+            });
+        }
+    }
+
     /// Spawns spheres at the default radius.
     pub fn spawn_wave(&mut self, n: usize, origin: [f32; 3], speed: f32) {
         self.spawn(n, origin, speed, Shape::Sphere, BODY_RADIUS);
@@ -145,6 +181,25 @@ mod tests {
         assert_eq!(w.bodies.len(), 64);
         assert_eq!(w.bodies[0].pos, [1.0, 2.0, 3.0]);
         assert_eq!(w.bodies[63].pos, [1.0 + 1.5, 2.0 + 1.5, 3.0 + 1.5]);
+        assert!(w.bodies.iter().all(|b| b.vel == [0.0; 3]));
+    }
+
+    #[test]
+    fn lattice_spawns_the_exact_count() {
+        // 100 000 is not a perfect cube. 46 cubed is 97 336, the under
+        // count the old round-down produced. The top layer stays partial.
+        let mut w = World::new();
+        w.spawn_lattice(100_000, [1.0, 2.0, 3.0], 0.5, Shape::Sphere, BODY_RADIUS);
+        assert_eq!(w.bodies.len(), 100_000);
+        assert_eq!(w.bodies[0].pos, [1.0, 2.0, 3.0]);
+        let side = 47;
+        let last = 100_000 - 1;
+        let spot = [
+            1.0 + (last % side) as f32 * 0.5,
+            2.0 + ((last / side) % side) as f32 * 0.5,
+            3.0 + (last / (side * side)) as f32 * 0.5,
+        ];
+        assert_eq!(w.bodies[last].pos, spot);
         assert!(w.bodies.iter().all(|b| b.vel == [0.0; 3]));
     }
 

@@ -283,9 +283,8 @@ impl App {
                 }
             }
             SpawnLayout::Lattice => {
-                let side = ((n as f32).cbrt().round() as usize).max(1);
                 self.world
-                    .spawn_grid(side, SPAWN_ORIGIN, 2.0 * radius, self.spawn_shape, radius);
+                    .spawn_lattice(n, SPAWN_ORIGIN, 2.0 * radius, self.spawn_shape, radius);
             }
         }
     }

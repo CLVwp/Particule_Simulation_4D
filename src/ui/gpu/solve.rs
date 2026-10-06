@@ -238,7 +238,9 @@ mod tests {
                 .poll(wgpu::PollType::wait_indefinitely())
                 .expect("full step poll fails");
         }
-        state.download_bodies(device, queue, n)
+        state
+            .download_bodies(device, queue, n)
+            .expect("bodies readback")
     }
 
     /// Top of the pile, in world units.

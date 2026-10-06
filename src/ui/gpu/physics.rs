@@ -634,13 +634,14 @@ impl GpuState {
         }
     }
 
-    /// Copies one u32 out of a storage buffer. Readback helper.
+    /// Copies one u32 out of a storage buffer. Readback helper. Returns
+    /// `None` when the device refuses the read.
     fn read_u32_at(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         source: &wgpu::Buffer,
         byte_offset: u64,
-    ) -> u32 {
+    ) -> Option<u32> {
         let stage = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("u32 readback"),
             size: 4,
@@ -651,33 +652,30 @@ impl GpuState {
             device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
         encoder.copy_buffer_to_buffer(source, byte_offset, &stage, 0, 4);
         queue.submit([encoder.finish()]);
-        device
-            .poll(wgpu::PollType::wait_indefinitely())
-            .expect("readback poll fails");
+        device.poll(wgpu::PollType::wait_indefinitely()).ok()?;
         stage.slice(..).map_async(wgpu::MapMode::Read, |_| {});
-        device
-            .poll(wgpu::PollType::wait_indefinitely())
-            .expect("readback map poll fails");
+        device.poll(wgpu::PollType::wait_indefinitely()).ok()?;
         let out = {
-            let view = stage.get_mapped_range(..).expect("map fails");
+            let view = stage.get_mapped_range(..).ok()?;
             let bytes: Vec<u8> = view.to_vec();
             u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
         };
         stage.unmap();
-        out
+        Some(out)
     }
 
     /// Pairs found and pairs dropped by the last recorded frame. Two
     /// synchronous polls, so the frame loop calls this at most once.
+    /// Returns `None` when the device refuses the read.
     pub(crate) fn pair_counters(
         &self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         n: usize,
-    ) -> (u32, u32) {
-        let total = Self::read_u32_at(device, queue, &self.pair_start_buf, n as u64 * 4);
+    ) -> Option<(u32, u32)> {
+        let total = Self::read_u32_at(device, queue, &self.pair_start_buf, n as u64 * 4)?;
         let dropped = total.saturating_sub(self.pairs_capacity);
-        (total, dropped)
+        Some((total, dropped))
     }
 
     /// The timestamp query set for the six phase boundaries, or `None`
@@ -853,15 +851,16 @@ impl GpuState {
 
     /// Reads the bodies back. One staging buffer per call; the frame loop
     /// never calls this, only the parity tests and the residency exit do.
+    /// Returns `None` when the device refuses the read.
     // ponytail: per-call staging; a ring of two if the latency ever shows
     pub(crate) fn download_bodies(
         &self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         n: usize,
-    ) -> Vec<GpuBody> {
+    ) -> Option<Vec<GpuBody>> {
         if n == 0 {
-            return Vec::new();
+            return Some(Vec::new());
         }
         let size = n as u64 * GPU_BODY_SIZE;
         let staging = device.create_buffer(&wgpu::BufferDescriptor {
@@ -874,20 +873,16 @@ impl GpuState {
             device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
         encoder.copy_buffer_to_buffer(&self.bodies_buf, 0, &staging, 0, size);
         queue.submit([encoder.finish()]);
-        device
-            .poll(wgpu::PollType::wait_indefinitely())
-            .expect("copy poll fails");
+        device.poll(wgpu::PollType::wait_indefinitely()).ok()?;
         staging.slice(..).map_async(wgpu::MapMode::Read, |_| {});
-        device
-            .poll(wgpu::PollType::wait_indefinitely())
-            .expect("map poll fails");
+        device.poll(wgpu::PollType::wait_indefinitely()).ok()?;
         // The view owns a mapped slice, so it drops before the unmap.
         let out = {
-            let view = staging.get_mapped_range(..).expect("map fails");
+            let view = staging.get_mapped_range(..).ok()?;
             bytemuck::cast_slice(&view).to_vec()
         };
         staging.unmap();
-        out
+        Some(out)
     }
 }
 
@@ -974,7 +969,9 @@ mod tests {
                 cpu.step(1.0 / 60.0);
             }
             run_gpu(&device, &queue, &state, &sim, n, frames);
-            let back = state.download_bodies(&device, &queue, n);
+            let back = state
+                .download_bodies(&device, &queue, n)
+                .expect("bodies readback");
             let diff = max_pos_diff(&back, &gpu_bodies_of(&cpu));
             println!("{label} cap {max_speed}: +{frames} frames, max gap {diff:.3e}");
             assert!(diff < 1e-4, "GPU and CPU drifted by {diff}");
@@ -1023,8 +1020,12 @@ mod tests {
         second.upload_bodies(&device, &queue, &mirror);
         run_gpu(&device, &queue, &first, &sim, n, 120);
         run_gpu(&device, &queue, &second, &sim, n, 120);
-        let a = first.download_bodies(&device, &queue, n);
-        let b = second.download_bodies(&device, &queue, n);
+        let a = first
+            .download_bodies(&device, &queue, n)
+            .expect("bodies readback");
+        let b = second
+            .download_bodies(&device, &queue, n)
+            .expect("bodies readback");
         assert_eq!(a, b, "two GPU runs diverged");
     }
 }

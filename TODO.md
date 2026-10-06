@@ -20,11 +20,12 @@ scene 7.565 ms — about 40 % of the frame. The frame is render-bound
 again. The GPU storage buffer item now leads, and grid work beats
 body sleep at this contact count.
 
-In-app F1 at 1 000 000 bodies, 2026-10-06 evening (CPU path, vertex
-pull on): step 15.7 ms, frame 25.9 ms, 39 FPS, 289k contacts.
-grid 6.7 ms (43 %), contacts 9.0 ms (48 %), resolve 1.7 ms. The CPU
-beat the old 20.5 ms baseline. The frame overhead beyond the step is
-about 10 ms, so the GPU step alone will not reach 60 FPS here.
+In-app F1 at 1 000 000 bodies, 2026-10-06 evening. CPU path, vertex
+pull on: step 15.7 ms, frame 25.9 ms, 39 FPS, 289k contacts.
+grid 6.7 ms (43 %), contacts 9.0 ms (48 %), resolve 1.7 ms. GPU path:
+step 4.1 ms, frame 7.4 ms, 140 FPS. The 1M GPU step extrapolation of
+14-18 ms was wrong; the pair pass scales better on a sparse scene
+than its 500k dense sample. The objective of 60 FPS at 1M is met.
 
 Tags: `[algo]` algorithm, `[par]` parallelism, `[arch]` architecture,
 `[visual]` visual shortcut.
@@ -66,9 +67,10 @@ Read this section before the first change of a new session.
   `Tuning.gpu_physics` and its body threshold. Tests:
   `cargo test --release --lib ui::gpu -- --nocapture
   --test-threads=1`. Release, settled 500k pile: full GPU step
-  7.99 ms against 18.28 ms on the CPU. Determinism is per device;
-  the CPU path stays the reference. See the GPU compute protocol
-  in CLAUDE.md.
+  7.99 ms against 18.28 ms on the CPU. In app at 1M: 4.1 ms and
+  140 FPS. The residency ends past the fixed CSR region, so the
+  wrap cannot happen. Determinism is per device; the CPU path
+  stays the reference. See the GPU compute protocol in CLAUDE.md.
 
 ## Contacts — 24.2 ms (75 % of the step)
 

@@ -15,7 +15,7 @@ mod pairs;
 mod physics;
 mod solve;
 
-pub(crate) use self::physics::{GpuState, SimUniforms, TABLE_MASK};
+pub(crate) use self::physics::{GpuState, SimUniforms, TABLE_MASK, TABLE_SIZE};
 
 /// Builds one offscreen device for the GPU test modules. Returns `None`
 /// without an adapter, so machines without Vulkan or DirectX skip.

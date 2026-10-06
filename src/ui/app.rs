@@ -11,7 +11,7 @@ use winit::keyboard::Key;
 use winit::window::{Window, WindowId};
 
 use crate::ui::camera::Camera;
-use crate::ui::gpu::{CamUniforms, GpuBody, GpuState, SimUniforms, TABLE_MASK};
+use crate::ui::gpu::{CamUniforms, GpuBody, GpuState, SimUniforms, TABLE_MASK, TABLE_SIZE};
 use crate::ui::input::{Drag, apply_drag, zoom};
 use crate::ui::renderer::{Frame, Renderer};
 use crate::ui::scene::SceneOut;
@@ -233,7 +233,11 @@ impl WindowState {
     /// Enters or leaves GPU residency, then records the physics into the
     /// frame encoder. Returns true when the GPU stepped.
     fn step_or_resident(&mut self, app: &mut App, encoder: &mut wgpu::CommandEncoder) -> bool {
+        // The pair CSR runs over a fixed region. Bodies past it cannot
+        // use the GPU pair pass, so the residency ends before the wrap.
+        let within_region = app.world.bodies.len() < TABLE_SIZE as usize;
         let want_gpu = !self.gpu_failed.load(Ordering::Relaxed)
+            && within_region
             && app.mode == PhysicsMode::Newton
             && app.tuning.gpu_physics
             && app.world.bodies.len() >= app.tuning.gpu_threshold;
@@ -251,13 +255,19 @@ impl WindowState {
         } else if !want_gpu && self.gpu_resident {
             // Exit: the resident state rides back into the world. Radius
             // and shape never change on the GPU, so the CPU copy stays
-            // right about everything but position and velocity.
-            let back = self
+            // right about everything but position and velocity. A lost
+            // device has no state to ride back; the CPU keeps its
+            // entry-time copy.
+            if let Some(back) = self
                 .gpu
-                .download_bodies(&self.device, &self.queue, self.gpu_n);
-            for (dst, src) in app.world.bodies.iter_mut().zip(&back) {
-                dst.pos = src.pos;
-                dst.vel = src.vel;
+                .download_bodies(&self.device, &self.queue, self.gpu_n)
+            {
+                for (dst, src) in app.world.bodies.iter_mut().zip(&back) {
+                    dst.pos = src.pos;
+                    dst.vel = src.vel;
+                }
+            } else {
+                self.lose_device("body readback failed".to_string());
             }
             self.gpu_resident = false;
             self.renderer.clear_external_bodies();
@@ -327,11 +337,19 @@ impl WindowState {
             self.ts_stage
                 .slice(..)
                 .map_async(wgpu::MapMode::Read, |_| {});
-            self.device
+            if self
+                .device
                 .poll(wgpu::PollType::wait_indefinitely())
-                .expect("timestamp poll fails");
+                .is_err()
+            {
+                self.lose_device("timestamp poll failed".to_string());
+                return;
+            }
             let ticks: [u64; 6] = {
-                let view = self.ts_stage.get_mapped_range(..).expect("map fails");
+                let Ok(view) = self.ts_stage.get_mapped_range(..) else {
+                    self.lose_device("timestamp map failed".to_string());
+                    return;
+                };
                 let bytes: Vec<u8> = view.to_vec();
                 let mut ticks = [0u64; 6];
                 for (slot, chunk) in ticks.iter_mut().zip(bytes.chunks_exact(8)) {
@@ -348,11 +366,23 @@ impl WindowState {
             let total: f32 = phases.iter().sum();
             app.step_ms = app.step_ms * SMOOTH_KEEP + total * SMOOTH_NEW;
         }
-        let (pairs, dropped) = self
+        let Some((pairs, dropped)) = self
             .gpu
-            .pair_counters(&self.device, &self.queue, self.gpu_n);
+            .pair_counters(&self.device, &self.queue, self.gpu_n)
+        else {
+            self.lose_device("pair counter read failed".to_string());
+            return;
+        };
         app.gpu_pairs = pairs;
         app.gpu_dropped = dropped;
+    }
+
+    /// Marks the session CPU-only after a failed GPU read. One report.
+    fn lose_device(&mut self, reason: String) {
+        if self.gpu_failed.swap(true, Ordering::Relaxed) {
+            return;
+        }
+        eprintln!("gpu device lost, cpu fallback: {reason}");
     }
 
     /// Renders one frame: physics, scene, particles, then egui on top.
