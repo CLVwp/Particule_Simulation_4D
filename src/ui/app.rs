@@ -10,7 +10,7 @@ use winit::keyboard::Key;
 use winit::window::{Window, WindowId};
 
 use crate::ui::App;
-use crate::ui::input::{Drag, ORBIT_SENSITIVITY, zoom};
+use crate::ui::input::{Drag, apply_drag, zoom};
 use crate::ui::renderer::Renderer;
 use crate::ui::scene::SceneOut;
 
@@ -354,22 +354,7 @@ impl ApplicationHandler for Handler {
                 if let (Some(drag), Some(last)) = (app.drag, app.last_mouse) {
                     let dx = pos[0] - last[0];
                     let dy = pos[1] - last[1];
-                    match drag {
-                        Drag::Orbit => {
-                            app.cam.yaw += dx * ORBIT_SENSITIVITY;
-                            app.cam.pitch =
-                                (app.cam.pitch + dy * ORBIT_SENSITIVITY).clamp(-1.4, 1.4);
-                        }
-                        Drag::Pan => {
-                            let scale = app.cam.dist * 0.0015;
-                            let right = app.cam.right();
-                            let up = app.cam.up();
-                            for a in 0..3 {
-                                app.cam.target[a] -= right[a] * dx * scale;
-                                app.cam.target[a] += up[a] * dy * scale;
-                            }
-                        }
-                    }
+                    apply_drag(&mut app.cam, drag, dx, dy);
                 }
                 app.last_mouse = Some(pos);
             }

@@ -179,6 +179,26 @@ pub(crate) fn zoom(cam: &mut Camera, dy: f32) {
     cam.dist = (cam.dist * (1.0 - 0.1 * dy)).clamp(3.0, 40.0);
 }
 
+/// Applies one drag step. Orbit turns yaw and pitch. Pan slides the target
+/// against the camera right axis and along the camera up axis.
+pub(crate) fn apply_drag(cam: &mut Camera, drag: Drag, dx: f32, dy: f32) {
+    match drag {
+        Drag::Orbit => {
+            cam.yaw += dx * ORBIT_SENSITIVITY;
+            cam.pitch = (cam.pitch + dy * ORBIT_SENSITIVITY).clamp(-1.4, 1.4);
+        }
+        Drag::Pan => {
+            let scale = cam.dist * 0.0015;
+            let right = cam.right();
+            let up = cam.up();
+            for a in 0..3 {
+                cam.target[a] -= right[a] * dx * scale;
+                cam.target[a] += up[a] * dy * scale;
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

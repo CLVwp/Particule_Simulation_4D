@@ -1,7 +1,7 @@
 //! Shared tuning constants and the per-simulation settings.
 
-use super::resolve::{PAIR_RESTITUTION, RESOLVE_ROUNDS};
-
+/// Fraction of relative speed kept when two bodies collide.
+const PAIR_RESTITUTION: f32 = 0.6;
 /// Downward acceleration, in units per second squared.
 pub const GRAVITY: f32 = -9.81;
 /// Height of the floor plane.
@@ -17,6 +17,8 @@ pub const MIN_RADIUS: f32 = 0.05;
 /// Pool work starts above this body count.
 /// ponytail: bench shows 16-thread sync is a net loss at 1000 bodies, a win at 4000
 pub const PAR_MIN: usize = 2048;
+/// Default solve rounds per step. Two rounds keep piles stiff enough.
+const RESOLVE_ROUNDS: usize = 2;
 
 /// Tunable laws of motion and solver tuning. `Default` matches the constants
 /// above.

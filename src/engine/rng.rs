@@ -16,3 +16,22 @@ impl Rng {
         ((self.0 >> 32) as u32 as f32 / u32::MAX as f32) * 2.0 - 1.0
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn next_f32_spans_full_range() {
+        // Fresh generator: this must not disturb the spawn seeds of other tests.
+        let mut rng = Rng(0x853C_49E6_748F_EA9B);
+        let (mut lo, mut hi) = (f32::MAX, f32::MIN);
+        for _ in 0..10_000 {
+            let v = rng.next_f32();
+            lo = lo.min(v);
+            hi = hi.max(v);
+        }
+        assert!(lo < -0.9, "never sampled below {lo}");
+        assert!(hi > 0.9, "never sampled above {hi}");
+    }
+}

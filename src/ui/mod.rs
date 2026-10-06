@@ -7,6 +7,7 @@ pub(crate) mod input;
 pub(crate) mod renderer;
 pub(crate) mod scene;
 pub(crate) mod theme;
+pub(crate) mod widgets;
 
 use std::time::Instant;
 

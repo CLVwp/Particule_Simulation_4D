@@ -1,15 +1,20 @@
-//! The world container: bodies, the step pipeline, and pool helpers.
+//! The world container: bodies, scratch buffers, and pool helpers.
 
 use std::sync::atomic::AtomicU32;
 use std::time::Instant;
 
 use rayon::prelude::*;
 
-use super::body::{Body, Shape};
-use super::config::{BODY_RADIUS, FLOOR_Y, MIN_RADIUS, SimSettings};
-use super::contacts::Contact;
-use super::resolve::ContactDelta;
-use super::rng::Rng;
+use self::contacts::Contact;
+use self::resolve::ContactDelta;
+use crate::engine::body::Body;
+use crate::engine::config::{BODY_RADIUS, SimSettings};
+
+mod contacts;
+mod grid;
+mod resolve;
+mod spawn;
+mod step;
 
 /// Logical cores visible to this process.
 #[must_use]
@@ -94,40 +99,6 @@ impl World {
         self.contacts.len()
     }
 
-    /// Spawns `n` bodies around `origin` with fountain-like velocities. The
-    /// spread grows with `n`, so one big spawn stays a cloud, not a point.
-    pub fn spawn(&mut self, n: usize, origin: [f32; 3], speed: f32, shape: Shape, radius: f32) {
-        let radius = radius.max(MIN_RADIUS);
-        self.cell_size = self.cell_size.max(2.0 * radius);
-        self.bodies.reserve(n);
-        let mut rng = Rng(0x2545F4914F6CDD1D ^ n as u64);
-        // A dense point makes the first step pair every body with every
-        // neighbor. Spread over a body-proportional volume instead: at 21 %
-        // packing the candidate pairs stay bounded by the neighborhood.
-        let spread = (radius * (n as f32 / 0.4).cbrt()).max(0.2);
-        for _ in 0..n {
-            self.bodies.push(Body {
-                pos: [
-                    origin[0] + rng.next_f32() * spread,
-                    origin[1] + rng.next_f32() * spread,
-                    origin[2] + rng.next_f32() * spread,
-                ],
-                vel: [
-                    rng.next_f32() * speed * 0.4,
-                    speed * (0.7 + 0.3 * rng.next_f32()),
-                    rng.next_f32() * speed * 0.4,
-                ],
-                radius,
-                shape,
-            });
-        }
-    }
-
-    /// Spawns spheres at the default radius.
-    pub fn spawn_wave(&mut self, n: usize, origin: [f32; 3], speed: f32) {
-        self.spawn(n, origin, speed, Shape::Sphere, BODY_RADIUS);
-    }
-
     /// Removes every body, resets the grid, and frees the scratch buffers.
     /// A big spawn transient leaves gigabytes of retained capacity behind;
     /// `clear` is the explicit boundary where that memory must go back.
@@ -147,52 +118,6 @@ impl World {
         free(&mut self.bc_cursor);
         free(&mut self.bc_items);
     }
-
-    /// Advances the world by `dt` seconds.
-    pub fn step(&mut self, dt: f32) {
-        let t = Instant::now();
-        self.integrate(dt);
-        self.phase_ms[0] = ms_since(t);
-        let t = Instant::now();
-        self.sort_cells();
-        self.phase_ms[1] = ms_since(t);
-        let t = Instant::now();
-        self.build_contacts();
-        self.phase_ms[2] = ms_since(t);
-        let t = Instant::now();
-        self.resolve();
-        self.phase_ms[3] = ms_since(t);
-        let t = Instant::now();
-        self.collide_floor();
-        self.phase_ms[4] = ms_since(t);
-    }
-
-    /// Explicit Euler integration, split across the pool.
-    fn integrate(&mut self, dt: f32) {
-        let g = self.settings.gravity;
-        let par_min = self.settings.par_min;
-        par_each(&mut self.bodies, par_min, |b| {
-            b.vel[1] += g * dt;
-            b.pos[0] += b.vel[0] * dt;
-            b.pos[1] += b.vel[1] * dt;
-            b.pos[2] += b.vel[2] * dt;
-        });
-    }
-
-    /// Floor plane at `FLOOR_Y`, spheres rest on top of it.
-    fn collide_floor(&mut self) {
-        let rest = self.settings.floor_restitution;
-        let friction = self.settings.ground_friction;
-        let par_min = self.settings.par_min;
-        par_each(&mut self.bodies, par_min, |b| {
-            if b.pos[1] - b.radius < FLOOR_Y && b.vel[1] < 0.0 {
-                b.pos[1] = FLOOR_Y + b.radius;
-                b.vel[1] = -b.vel[1] * rest;
-                b.vel[0] *= friction;
-                b.vel[2] *= friction;
-            }
-        });
-    }
 }
 
 /// Wall time since `t`, in milliseconds.
@@ -206,5 +131,21 @@ fn par_each<T: Send>(slice: &mut [T], par_min: usize, f: impl Fn(&mut T) + Sync 
         slice.iter_mut().for_each(f);
     } else {
         slice.par_iter_mut().for_each(f);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clear_releases_the_scratch_capacity() {
+        let mut w = World::new();
+        w.spawn_wave(3000, [0.0, 5.0, 0.0], 4.0);
+        w.step(1.0 / 60.0);
+        w.clear();
+        assert_eq!(w.contacts.capacity(), 0, "contacts kept its capacity");
+        assert_eq!(w.bc_items.capacity(), 0, "bc_items kept its capacity");
+        assert_eq!(w.cell_sort.capacity(), 0, "cell_sort kept its capacity");
     }
 }

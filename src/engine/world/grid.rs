@@ -111,3 +111,61 @@ impl World {
         cell_start.push(cell_sort.len() as u32);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use crate::engine::config::BODY_RADIUS;
+
+    #[test]
+    fn cells_are_sorted_and_match_bodies() {
+        let mut w = World::new();
+        w.spawn_wave(200, [0.0, 5.0, 0.0], 4.0);
+        w.step(1.0 / 60.0);
+        // step() moves bodies after the sort (contacts push them), so re-sync
+        // the array with the final positions before checking.
+        w.sort_cells();
+        assert_eq!(w.cell_sort.len(), w.bodies.len(), "lost bodies in the sort");
+        assert!(
+            w.cell_sort.windows(2).all(|pair| pair[0] <= pair[1]),
+            "cell keys not sorted"
+        );
+        // Every body finds its own (key, index) pair in the sorted array.
+        let cs = 2.0 * BODY_RADIUS;
+        for (i, b) in w.bodies.iter().enumerate() {
+            let entry = (cell_key(b.pos, cs), i as u32);
+            assert!(
+                w.cell_sort.binary_search(&entry).is_ok(),
+                "body {i} missing from the sorted cells"
+            );
+        }
+    }
+
+    #[test]
+    fn key_part_clamps_extreme_cells_into_the_field() {
+        // No input may escape the 21-bit key field.
+        let cases = [
+            0,
+            1,
+            -1,
+            KEY_OFF - 1,
+            KEY_OFF,
+            -KEY_OFF,
+            -KEY_OFF - 1,
+            1 << 62,
+            -(1 << 62),
+        ];
+        for &v in &cases {
+            assert!(
+                key_part(v) < KEY_SPAN as u64,
+                "key_part({v}) left the field"
+            );
+        }
+        // Values past each edge fold onto the first and last field value.
+        assert_eq!(key_part(-KEY_OFF - 1), 0);
+        assert_eq!(key_part(-KEY_OFF), 0);
+        assert_eq!(key_part(KEY_OFF - 1), (KEY_SPAN - 1) as u64);
+        assert_eq!(key_part(KEY_OFF), (KEY_SPAN - 1) as u64);
+    }
+}

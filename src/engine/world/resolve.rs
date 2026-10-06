@@ -3,18 +3,15 @@
 use rayon::prelude::*;
 
 use super::World;
-use super::body::Body;
 use super::contacts::{Contact, J_SIDE};
+use crate::engine::body::Body;
 
-pub(super) const PAIR_RESTITUTION: f32 = 0.6;
 const SLOP: f32 = 0.001; // allowed penetration
 const CORRECTION: f32 = 0.8; // share of overlap removed each step
-/// Default solve rounds per step. Two rounds keep piles stiff enough.
-pub(super) const RESOLVE_ROUNDS: usize = 2;
 
 /// Impulse and correction data for one contact, recomputed every round.
 #[derive(Clone, Copy, Debug)]
-pub(super) struct ContactDelta {
+pub(in crate::engine) struct ContactDelta {
     /// Contact normal, from `i` to `j`.
     n: [f32; 3],
     push: f32,

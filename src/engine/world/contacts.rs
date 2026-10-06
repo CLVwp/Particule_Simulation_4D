@@ -5,12 +5,12 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use rayon::prelude::*;
 
 use super::World;
-use super::body::Body;
 use super::grid::{STENCIL, key_cell, pack_cell};
+use crate::engine::body::Body;
 
 /// A pair of bodies that may overlap. Masses are stored once; they never change.
 #[derive(Clone, Copy, Debug)]
-pub(super) struct Contact {
+pub(in crate::engine) struct Contact {
     pub(super) i: u32,
     pub(super) j: u32,
     pub(super) mi: f32,
