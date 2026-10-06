@@ -47,6 +47,9 @@ pub(crate) fn hud(ctx: &Context, app: &mut App) {
                     app.page = Page::Menu;
                     app.drag = None;
                 }
+                if ui.button("Frame").clicked() {
+                    app.frame_scene();
+                }
                 ui.separator();
                 // The fluid mode draws no bodies, so its world edits would
                 // stay invisible. Disable the body buttons while it runs.

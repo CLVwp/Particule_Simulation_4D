@@ -4,8 +4,9 @@ use super::{LineVert, NEAR, SceneOut};
 use crate::ui::camera::Camera;
 use crate::ui::theme::hsla_to_rgba;
 
-/// Floor grid half span, in grid steps. Covers -10..=10 world units.
-const GRID_HALF: i32 = 10;
+/// Floor grid half span, in grid steps. Covers -30..=30 world units, wide
+/// enough to floor a framed million-body cloud.
+const GRID_HALF: i32 = 30;
 /// Distance between two grid lines, in world units.
 const GRID_STEP: i32 = 1;
 /// Axis arm length, in world units.

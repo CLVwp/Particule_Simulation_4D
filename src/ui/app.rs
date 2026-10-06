@@ -9,6 +9,7 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::Key;
 use winit::window::{Window, WindowId};
 
+use crate::ui::camera::Camera;
 use crate::ui::gpu::CamUniforms;
 use crate::ui::input::{Drag, apply_drag, zoom};
 use crate::ui::renderer::{Frame, Renderer};
@@ -345,6 +346,11 @@ impl ApplicationHandler for Handler {
                         } else if !response.consumed
                             && !state.egui.egui_ctx().egui_wants_keyboard_input()
                         {
+                            // R resets the camera. Unbound by default; a
+                            // custom binding on R fires both.
+                            if key == "r" {
+                                app.cam = Camera::default();
+                            }
                             app.input.keys.insert(key);
                         }
                     }

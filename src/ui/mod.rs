@@ -173,6 +173,43 @@ impl App {
         self.step_ms = self.step_ms * SMOOTH_KEEP + ms * SMOOTH_NEW;
     }
 
+    /// Points the camera at the whole body cloud. Fits the bounding sphere
+    /// of the bodies into view. No-op on an empty world.
+    pub(crate) fn frame_scene(&mut self) {
+        if self.world.bodies.is_empty() {
+            return;
+        }
+        let mut lo = [f32::MAX; 3];
+        let mut hi = [f32::MIN; 3];
+        for b in &self.world.bodies {
+            for k in 0..3 {
+                lo[k] = lo[k].min(b.pos[k]);
+                hi[k] = hi[k].max(b.pos[k]);
+            }
+        }
+        let center = [
+            (lo[0] + hi[0]) * 0.5,
+            (lo[1] + hi[1]) * 0.5,
+            (lo[2] + hi[2]) * 0.5,
+        ];
+        let radius = self
+            .world
+            .bodies
+            .iter()
+            .map(|b| {
+                let d = [
+                    b.pos[0] - center[0],
+                    b.pos[1] - center[1],
+                    b.pos[2] - center[2],
+                ];
+                (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt() + b.radius
+            })
+            .fold(0.0, f32::max);
+        self.cam.target = center;
+        // 2.2 keeps the sphere clear of the viewport edge at any aspect.
+        self.cam.dist = (radius * 2.2).clamp(3.0, 200.0);
+    }
+
     /// Spawns `n` bodies with the panel parameters. Clamps the radius to the
     /// engine floor. The lattice maps the count to a cube side.
     pub(crate) fn spawn_from_panel(&mut self, n: usize) {

@@ -174,9 +174,10 @@ pub(crate) fn apply_moves(input: &InputState, cam: &mut Camera, scale: f32) {
     cam.target = t;
 }
 
-/// Zooms one wheel step. `dy` is the scroll amount in lines. Clamped.
+/// Zooms one wheel step. `dy` is the scroll amount in lines. Clamped wide
+/// enough for one `Frame` fit of a million-body cloud.
 pub(crate) fn zoom(cam: &mut Camera, dy: f32) {
-    cam.dist = (cam.dist * (1.0 - 0.1 * dy)).clamp(3.0, 40.0);
+    cam.dist = (cam.dist * (1.0 - 0.1 * dy)).clamp(3.0, 200.0);
 }
 
 /// Applies one drag step. Orbit turns yaw and pitch. Pan slides the target
