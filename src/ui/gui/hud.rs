@@ -1,13 +1,13 @@
 //! HUD, toolbar, and the axis tip labels.
 
-use egui::{Align2, Area, Color32, Context, FontId, Id, LayerId, Vec2, pos2};
+use egui::{Align2, Area, Button, Color32, Context, FontId, Id, LayerId, Vec2, pos2};
 
 use particule_simulation_4d::engine::thread_count;
 
 use crate::ui::input::MoveAction;
 use crate::ui::scene::SceneOut;
 use crate::ui::widgets::faint_px;
-use crate::ui::{App, Page};
+use crate::ui::{App, Page, PhysicsMode};
 
 /// HUD and toolbar. Status lines, the menu button, and the quick spawn row.
 pub(crate) fn hud(ctx: &Context, app: &mut App) {
@@ -26,15 +26,8 @@ pub(crate) fn hud(ctx: &Context, app: &mut App) {
                     ),
                     12.0,
                 );
-                let [fwd, back, left, right, rise, sink] = [
-                    MoveAction::Forward,
-                    MoveAction::Back,
-                    MoveAction::Left,
-                    MoveAction::Right,
-                    MoveAction::Rise,
-                    MoveAction::Sink,
-                ]
-                .map(|action| app.input.bindings[action as usize].to_uppercase());
+                let [fwd, back, left, right, rise, sink] = MoveAction::all()
+                    .map(|action| app.input.bindings[action as usize].to_uppercase());
                 faint_px(
                     ui,
                     format!("Slide: {fwd} {back} {left} {right}.  Rise: {rise}.  Sink: {sink}."),
@@ -52,17 +45,24 @@ pub(crate) fn hud(ctx: &Context, app: &mut App) {
                     app.drag = None;
                 }
                 ui.separator();
-                ui.horizontal(|ui| {
-                    if ui.button("+100").clicked() {
-                        app.spawn_from_panel(100);
-                    }
-                    if ui.button("+1000").clicked() {
-                        app.spawn_from_panel(1000);
-                    }
-                    if ui.button("Clear").clicked() {
-                        app.world.clear();
-                    }
-                });
+                // The fluid mode draws no bodies, so its world edits would
+                // stay invisible. Disable the body buttons while it runs.
+                let newton = app.mode == PhysicsMode::Newton;
+                let spawn100 = ui
+                    .add_enabled(newton, Button::new("+100"))
+                    .on_disabled_hover_text("Bodies stay hidden in fluid mode");
+                if spawn100.clicked() {
+                    app.spawn_from_panel(100);
+                }
+                let spawn1000 = ui
+                    .add_enabled(newton, Button::new("+1000"))
+                    .on_disabled_hover_text("Bodies stay hidden in fluid mode");
+                if spawn1000.clicked() {
+                    app.spawn_from_panel(1000);
+                }
+                if ui.add_enabled(newton, Button::new("Clear")).clicked() {
+                    app.world.clear();
+                }
             });
         });
 }
@@ -79,6 +79,9 @@ pub(crate) fn axis_labels(ctx: &Context, scene: &SceneOut) {
         LayerId::background(),
         ctx.viewport_rect(),
     );
+    // The scene stores label positions in physical pixels. egui painters
+    // take logical points, so the scaling factor divides here.
+    let ppp = ctx.pixels_per_point();
     for (x, y, rgba, label) in &scene.axis_labels {
         let color = Color32::from_rgba_unmultiplied(
             channel(rgba[0]),
@@ -87,7 +90,7 @@ pub(crate) fn axis_labels(ctx: &Context, scene: &SceneOut) {
             channel(rgba[3]),
         );
         painter.text(
-            pos2(*x, *y),
+            pos2(x / ppp, y / ppp),
             Align2::CENTER_TOP,
             *label,
             FontId::proportional(11.0),
