@@ -31,16 +31,19 @@ stay green), `cargo bench`, and the F1 phase table before and after.
 Read this section before the first change of a new session.
 
 - The F1 panel tunes every optimization live. Render knobs live in
-  `Tuning` (`ui/scene.rs`). Engine knobs live in `SimSettings`
+  `Tuning` (`ui/scene/mod.rs`). Engine knobs live in `SimSettings`
   (`par_min`, `prune_dead_pairs`).
+- The engine container and its phases live in `engine/world/`. The UI
+  pages live in `ui/gui/`, the scene build in `ui/scene/`, and the
+  reusable egui components in `ui/widgets.rs`.
 - At 500k bodies the step is physics-bound. The render knobs do not
   move the FPS. Work on the engine phases only.
 - The scan is a sorted-key CSR with a monotone merge walk per stencil
-  offset. `grid.rs` holds the key sort. `contacts.rs` holds the walk,
-  the CSR fill, and the `bc_*` body lists.
+  offset. `world/grid.rs` holds the key sort. `world/contacts.rs` holds
+  the walk, the CSR fill, and the `bc_*` body lists.
 - A hash-map scan was measured twice and reverted. It regressed at
   small counts. Do not revisit it without a new design.
-- `world.rs::par_each` is the pool gate. It compares the slice length
+- `world/mod.rs::par_each` is the pool gate. It compares the slice length
   with `settings.par_min`. Reuse it for the parallel CSR fill.
 - Per-phase timings sit in `World::phase_ms`. The F1 table reads them.
 - Every number in this file comes from sphere-only piles. The `step_shape`

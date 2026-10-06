@@ -76,9 +76,14 @@ working default:
 
 ```
 src/
-  engine/    physics core. No UI code. Fully unit tested.
-  ui/        window, renderer, scene build, input, egui panels.
-  perf.rs    counting allocator behind the memory stats.
+  engine/       physics core. No UI code. Fully unit tested.
+    world/      the World container and the five step phases.
+    fluid/      the Navier-Stokes fluid mode.
+  ui/           window, renderer, input, and the app state.
+    widgets.rs  reusable egui components.
+    gui/        the pages: menu, settings, HUD, side windows, overlay.
+    scene/      the scene build: project, cull, LOD merge, sort.
+  perf.rs       counting allocator behind the memory stats.
 ```
 
 The engine holds the laws of motion and the solver. It knows nothing about
