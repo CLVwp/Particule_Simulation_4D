@@ -58,7 +58,9 @@ working default:
 - **Off-screen cull** — drops quads outside the viewport before the sort.
 - **Fluid cutoff** — fluid cells below this density do not draw.
 - **Prune dead pairs** — keeps only overlapping pairs in the contact list.
-  The dropped pairs contribute zero to the solve, so the physics is identical.
+  The dropped pairs add zero in the scan round. One solve round replays
+  bit-exact. Later rounds can see overlaps that earlier rounds created,
+  so with two rounds long runs drift a little.
 - **PAR_MIN** — the rayon pool starts above this body count. Set it to `0`
   to force the parallel path, or raise it to force the inline path.
 

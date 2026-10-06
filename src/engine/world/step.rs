@@ -80,6 +80,101 @@ mod tests {
     use crate::engine::body::{Body, Shape};
     use crate::engine::config::{BODY_RADIUS, FLOOR_Y};
 
+    /// Two worlds from one spawn. The seed derives from the count alone, so
+    /// both start bit-identical.
+    fn twin_worlds(n: usize) -> (World, World) {
+        let mut a = World::new();
+        let mut b = World::new();
+        a.spawn_wave(n, [0.0, 5.0, 0.0], 4.0);
+        b.spawn_wave(n, [0.0, 5.0, 0.0], 4.0);
+        (a, b)
+    }
+
+    /// Biggest per-axis position gap between two worlds.
+    fn max_pos_diff(a: &World, b: &World) -> f32 {
+        a.bodies
+            .iter()
+            .zip(&b.bodies)
+            .map(|(x, y)| {
+                (x.pos[0] - y.pos[0])
+                    .abs()
+                    .max((x.pos[1] - y.pos[1]).abs())
+                    .max((x.pos[2] - y.pos[2]).abs())
+            })
+            .fold(0.0, f32::max)
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn same_spawn_replays_bit_exact() {
+        // The spawn seed is fixed, so two identical runs must agree to the
+        // last bit. This pins the determinism the 1e-4 tolerance test hides.
+        let (mut a, mut b) = twin_worlds(1000);
+        for _ in 0..60 {
+            a.step(1.0 / 60.0);
+            b.step(1.0 / 60.0);
+        }
+        assert!(
+            max_pos_diff(&a, &b) == 0.0,
+            "same spawn replayed with a gap"
+        );
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn prune_dead_pairs_keeps_the_physics_one_round() {
+        // The scan drops pairs that add zero in that round. One solve round
+        // must therefore replay bit-exact without the prune. Two rounds do
+        // not hold this: round two can see overlaps that round one's pushes
+        // created, and those pairs are absent from the pruned list. That
+        // drift is the price of the knob, and the README states it.
+        let (mut a, mut b) = twin_worlds(1000);
+        a.settings.resolve_rounds = 1;
+        b.settings.resolve_rounds = 1;
+        b.settings.prune_dead_pairs = false;
+        for _ in 0..60 {
+            a.step(1.0 / 60.0);
+            b.step(1.0 / 60.0);
+        }
+        assert!(
+            max_pos_diff(&a, &b) == 0.0,
+            "one-round prune replay moved the pile"
+        );
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn resolve_epsilon_keeps_the_physics() {
+        // TODO: epsilon zero disables the early exit. A small epsilon only
+        // skips rounds the solve calls motionless.
+        let (mut a, mut b) = twin_worlds(1000);
+        b.settings.resolve_epsilon = 1e-4;
+        for _ in 0..60 {
+            a.step(1.0 / 60.0);
+            b.step(1.0 / 60.0);
+        }
+        let diff = max_pos_diff(&a, &b);
+        assert!(diff < 1e-5, "epsilon moved the pile by {diff}");
+    }
+
+    #[test]
+    fn shape_tag_never_changes_the_trajectory() {
+        // The bench step_shape asserts equal timings across shape mixes.
+        // This test asserts the stronger fact: the physics reads no shape.
+        let mut a = World::new();
+        let mut b = World::new();
+        a.spawn(500, [0.0, 5.0, 0.0], 4.0, Shape::Sphere, BODY_RADIUS);
+        b.spawn(500, [0.0, 5.0, 0.0], 4.0, Shape::Cube, BODY_RADIUS);
+        for _ in 0..60 {
+            a.step(1.0 / 60.0);
+            b.step(1.0 / 60.0);
+        }
+        assert!(
+            max_pos_diff(&a, &b) == 0.0,
+            "shape changed the trajectory"
+        );
+    }
+
     #[test]
     // ponytail: miri runs these 600-step loops thousands of times slower.
     // `cargo test` still runs them on every machine. Revisit when miri gets faster.
