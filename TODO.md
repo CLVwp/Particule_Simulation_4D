@@ -5,9 +5,12 @@ contacts 24.22 ms, resolve 3.91 ms, grid 3.36 ms. Order the work by
 phase weight: contacts first.
 
 After the 2026-10-06 wave (settled pile, `cargo run --release
---example phase_table 500000`): step 15.53 ms. contacts 10.12 ms,
-grid 2.97 ms, resolve 2.18 ms. The phase table example reproduces the
-F1 table headless. Use it before and after every change.
+--example phase_table 500000`, median of three runs): step 15.59 ms.
+contacts 10.02 ms, grid 2.81 ms, resolve 2.61 ms. Resolve paid
+0.45 ms for the pair-friction delta: `ContactDelta` grew 20 to 36
+bytes to carry the tangent. The phase table example reproduces the
+F1 table headless, settles 60 frames like the benches. Use it before
+and after every change.
 
 In-app F1 at 500k, sparse scene (19 893 contacts): frame 19.0 ms,
 step 7.747 ms. contacts 3.967 ms, grid 3.127 ms, resolve 0.683 ms.
@@ -32,7 +35,9 @@ Read this section before the first change of a new session.
 
 - The F1 panel tunes every optimization live. Render knobs live in
   `Tuning` (`ui/scene/mod.rs`). Engine knobs live in `SimSettings`
-  (`par_min`, `prune_dead_pairs`).
+  (`par_min`, `prune_dead_pairs`, `max_speed`, `pair_friction`,
+  `pair_restitution`, `resolve_rounds`, `resolve_epsilon`). Space
+  pauses the sim, and the Physics window scales the step.
 - The engine container and its phases live in `engine/world/`. The UI
   pages live in `ui/gui/`, the scene build in `ui/scene/`, and the
   reusable egui components in `ui/widgets.rs`.
