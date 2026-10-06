@@ -58,6 +58,15 @@ Read this section before the first change of a new session.
   1M, one settled pile per mix, same count per scale. Physics reads no
   shape tag, so the three rows of a scale must stay equal. A gap means
   the engine grew shape-dependent.
+- The GPU side lives in `ui/gpu/`. The render path draws bodies from a
+  GPU storage buffer (`Tuning.gpu_render`); the CPU scene build keeps
+  only the lines and axis labels. The physics kernels (integrate,
+  floor, grid, pairs) run on device with exact parity, behind tests:
+  `cargo test --release --lib ui::gpu -- --nocapture
+  --test-threads=1`. Release, settled 500k pile: grid 0.52 ms, grid
+  plus pairs 5.42 ms, against about 15.1 ms CPU for the same phases.
+  The solve and the app wiring are the open work. See the GPU
+  compute protocol in CLAUDE.md.
 
 ## Contacts — 24.2 ms (75 % of the step)
 
@@ -84,7 +93,11 @@ Read this section before the first change of a new session.
   Est: small on contacts and resolve. Effort: small.
 - [ ] `[arch]` **GPU broad phase.** Hash grid and pair list in compute
   shaders. The CPU reads counts only. Est: contacts under 2 ms.
-  Effort: high. See the roadmap item in the README.
+  Effort: high. See the roadmap item in the README. Progress
+  2026-10-06: grid and pairs run on device with exact parity;
+  grid plus pairs read 5.42 ms at 500k settled against about
+  15.1 ms CPU. The first pair pass recomputes the cell of every
+  candidate; a per-body cell cache is the known next cut.
 
 ## Resolve — 3.9 ms (12 % of the step)
 
@@ -113,10 +126,12 @@ Read this section before the first change of a new session.
 
 ## Cross-cutting
 
-- [ ] `[arch]` **Render from a GPU storage buffer.** Give the vertex
-  shader the raw body positions; the GPU projects and culls. The scene
-  phase drops to one buffer write. Tile merge goes away, and the GPU
-  absorbs the overdraw. Effort: medium-high.
+- [x] `[arch]` **Render from a GPU storage buffer.** The vertex shader
+  reads raw bodies and projects on device. Landed 2026-10-06
+  (`Tuning.gpu_render`): the CPU scene build drops to lines and axis
+  labels, and the 500k sparse frame went 19.0 to about 12 ms. Tile
+  merge and off-screen cull only shape the CPU path; the F1 panel
+  greys them out while the GPU draws.
 - [ ] `[visual]` **Adaptive LOD.** Raise `merge px` automatically so
   instances stay under a budget. Bounds the scene phase at any count.
   Effort: small.

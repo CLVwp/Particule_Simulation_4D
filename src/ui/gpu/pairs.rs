@@ -5,8 +5,7 @@ use std::mem::size_of;
 
 use bytemuck::{Pod, Zeroable};
 
-use super::GpuBody;
-use super::physics::{GpuState, SimUniforms, WORKGROUP};
+use super::physics::{GpuState, WORKGROUP};
 
 /// One contact pair. Mirrors the CPU `Contact`: two indices and two
 /// masses. Exactly 16 bytes.
@@ -69,6 +68,7 @@ impl GpuState {
     }
 
     /// Reads the pair total and the kept pairs back. Test-only.
+    #[cfg(test)]
     pub(crate) fn download_pairs(
         &self,
         device: &wgpu::Device,
@@ -141,8 +141,8 @@ impl GpuState {
 mod tests {
     use super::*;
     use crate::engine::{SimSettings, World};
-    use crate::ui::gpu::headless_device;
-    use crate::ui::gpu::physics::TABLE_MASK;
+    use crate::ui::gpu::physics::{SimUniforms, TABLE_MASK};
+    use crate::ui::gpu::{GpuBody, headless_device};
 
     /// Builds the grid and the pairs on the GPU for one frame and returns
     /// the total and the kept pairs.

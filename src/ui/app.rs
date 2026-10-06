@@ -10,11 +10,12 @@ use winit::keyboard::Key;
 use winit::window::{Window, WindowId};
 
 use crate::ui::camera::Camera;
-use crate::ui::gpu::CamUniforms;
+use crate::ui::gpu::{CamUniforms, GpuBody, GpuState, SimUniforms, TABLE_MASK};
 use crate::ui::input::{Drag, apply_drag, zoom};
 use crate::ui::renderer::{Frame, Renderer};
 use crate::ui::scene::SceneOut;
-use crate::ui::{App, Page, PhysicsMode};
+use crate::ui::theme::{SMOOTH_KEEP, SMOOTH_NEW};
+use crate::ui::{App, FIXED_DT, Page, PhysicsMode};
 
 /// Title of the app window.
 const WINDOW_TITLE: &str = "Particule Simulation 4D";
@@ -43,6 +44,24 @@ struct WindowState {
     size: (u32, u32),
     /// True while the shift key is held.
     shift: bool,
+    /// The GPU physics state. Buffers and pipelines only; the step runs
+    /// when the residency handshake below says so.
+    gpu: GpuState,
+    /// True while the bodies live in the GPU buffer.
+    gpu_resident: bool,
+    /// Body count the GPU buffer holds.
+    gpu_n: usize,
+    /// Set by the first device error. The physics falls back to the CPU
+    /// for the rest of the session.
+    gpu_failed: bool,
+    /// Phase timestamps, when the adapter supports the queries.
+    ts_set: Option<wgpu::QuerySet>,
+    /// Resolved timestamp ticks for the last recorded frame.
+    ts_resolve: wgpu::Buffer,
+    /// Mapped copy of the resolved ticks.
+    ts_stage: wgpu::Buffer,
+    /// Nanoseconds per timestamp tick.
+    ts_period: f32,
 }
 
 impl WindowState {
@@ -73,15 +92,32 @@ impl WindowState {
         app.adapter_info = format!("{} ({:?})", info.name, info.backend);
         eprintln!("adapter: {}", app.adapter_info);
 
+        // The phase timestamps ride along when the adapter has them.
+        let wants_ts = adapter.features().contains(wgpu::Features::TIMESTAMP_QUERY);
+        let required = if wants_ts {
+            wgpu::Features::TIMESTAMP_QUERY
+        } else {
+            wgpu::Features::empty()
+        };
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("main device"),
-            required_features: wgpu::Features::default(),
+            required_features: required,
             required_limits: wgpu::Limits::default(),
             experimental_features: wgpu::ExperimentalFeatures::default(),
             memory_hints: wgpu::MemoryHints::default(),
             trace: wgpu::Trace::default(),
         }))
         .map_err(|error| error.to_string())?;
+        let gpu = GpuState::new(&device);
+        let ts_set = GpuState::timestamp_set(&device);
+        let ts_resolve = GpuState::timestamp_resolve(&device);
+        let ts_stage = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("physics phase staging"),
+            size: 6 * 8,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let ts_period = queue.get_timestamp_period();
 
         let raw = window.inner_size();
         let size = (raw.width.max(1), raw.height.max(1));
@@ -134,6 +170,14 @@ impl WindowState {
             scene: SceneOut::default(),
             size,
             shift: false,
+            gpu,
+            gpu_resident: false,
+            gpu_n: 0,
+            gpu_failed: false,
+            ts_set,
+            ts_resolve,
+            ts_stage,
+            ts_period,
         })
     }
 
@@ -171,10 +215,126 @@ impl WindowState {
         }
     }
 
+    /// Enters or leaves GPU residency, then records the physics into the
+    /// frame encoder. Returns true when the GPU stepped.
+    fn step_or_resident(&mut self, app: &mut App, encoder: &mut wgpu::CommandEncoder) -> bool {
+        let want_gpu = !self.gpu_failed
+            && app.mode == PhysicsMode::Newton
+            && app.tuning.gpu_physics
+            && app.world.bodies.len() >= app.tuning.gpu_threshold;
+        if want_gpu && !self.gpu_resident {
+            let mirror: Vec<GpuBody> = app.world.bodies.iter().map(GpuBody::from_body).collect();
+            self.gpu_n = mirror.len();
+            self.gpu.upload_bodies(&self.device, &self.queue, &mirror);
+            self.gpu_resident = true;
+            self.renderer.use_external_bodies(
+                &self.device,
+                self.gpu.render_buffer(),
+                self.gpu_n as u32,
+            );
+        } else if !want_gpu && self.gpu_resident {
+            // Exit: the resident state rides back into the world. Radius
+            // and shape never change on the GPU, so the CPU copy stays
+            // right about everything but position and velocity.
+            let back = self
+                .gpu
+                .download_bodies(&self.device, &self.queue, self.gpu_n);
+            for (dst, src) in app.world.bodies.iter_mut().zip(&back) {
+                dst.pos = src.pos;
+                dst.vel = src.vel;
+            }
+            self.gpu_resident = false;
+            self.renderer.clear_external_bodies();
+        }
+        if self.gpu_resident && app.world.bodies.len() != self.gpu_n {
+            if app.world.bodies.len() > self.gpu_n {
+                // A spawn while resident: the CPU owns only the fresh tail.
+                let mirror: Vec<GpuBody> =
+                    app.world.bodies.iter().map(GpuBody::from_body).collect();
+                let from = self.gpu_n;
+                self.gpu.upload_bodies(&self.device, &self.queue, &mirror);
+                self.gpu.upload_tail(&self.queue, &mirror, from);
+                self.gpu_n = mirror.len();
+                self.renderer.use_external_bodies(
+                    &self.device,
+                    self.gpu.render_buffer(),
+                    self.gpu_n as u32,
+                );
+            } else {
+                // A clear while resident. The buffers stay.
+                self.gpu_n = app.world.bodies.len();
+                self.renderer
+                    .use_external_bodies(&self.device, self.gpu.render_buffer(), 0);
+            }
+        }
+        if !self.gpu_resident || self.gpu_failed {
+            app.step_physics();
+            return false;
+        }
+        app.tick_frame();
+        // The same gates the CPU step honors: menu, pause, time scale.
+        if app.page != Page::Sim || app.paused {
+            return false;
+        }
+        let sim = SimUniforms::new(
+            &app.world.settings,
+            FIXED_DT * app.time_scale,
+            app.world.cell_size(),
+            TABLE_MASK,
+            self.gpu_n,
+        );
+        self.gpu.write_sim(&self.queue, &sim);
+        let rounds = app.world.settings.resolve_rounds.max(1);
+        self.gpu
+            .record_full_step(encoder, self.gpu_n, rounds, self.ts_set.as_ref());
+        true
+    }
+
+    /// Reads the phase timestamps and the pair counters back. The poll
+    /// blocks until the frame finishes, which keeps the panel honest at
+    /// the cost of the old synchronous frame shape.
+    // ponytail: one sync poll per frame; a two-slot staging ring if the
+    // latency ever shows
+    fn read_gpu_feedback(&mut self, app: &mut App) {
+        self.ts_stage
+            .slice(..)
+            .map_async(wgpu::MapMode::Read, |_| {});
+        self.device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("timestamp poll fails");
+        let ticks: [u64; 6] = {
+            let view = self.ts_stage.get_mapped_range(..).expect("map fails");
+            let bytes: Vec<u8> = view.to_vec();
+            let mut ticks = [0u64; 6];
+            for (slot, chunk) in ticks.iter_mut().zip(bytes.chunks_exact(8)) {
+                *slot = u64::from_le_bytes(chunk.try_into().expect("eight bytes"));
+            }
+            ticks
+        };
+        self.ts_stage.unmap();
+        let mut phases = [0.0f32; 5];
+        for i in 0..5 {
+            phases[i] = (ticks[i + 1].saturating_sub(ticks[i])) as f32 * self.ts_period / 1.0e6;
+        }
+        app.gpu_phase_ms = phases;
+        let (pairs, dropped) = self
+            .gpu
+            .pair_counters(&self.device, &self.queue, self.gpu_n);
+        app.gpu_pairs = pairs;
+        app.gpu_dropped = dropped;
+        let total: f32 = phases.iter().sum();
+        app.step_ms = app.step_ms * SMOOTH_KEEP + total * SMOOTH_NEW;
+    }
+
     /// Renders one frame: physics, scene, particles, then egui on top.
     fn draw(&mut self, target: wgpu::SurfaceTexture, app: &mut App) {
         let raw_input = self.egui.take_egui_input(&self.window);
-        app.step_physics();
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("frame"),
+            });
+        let gpu_stepped = self.step_or_resident(app, &mut encoder);
         let ctx = self.egui.egui_ctx().clone();
         ctx.begin_pass(raw_input);
         crate::ui::gui::show(&ctx, app, &self.scene);
@@ -185,7 +345,7 @@ impl WindowState {
         // The scene build works in physical pixels. The shader converts with
         // the same size, so the scaling factor cancels at every DPI.
         let (w, h) = (self.size.0 as f32, self.size.1 as f32);
-        app.build_scene(w, h, &mut self.scene);
+        app.build_scene(w, h, gpu_stepped, &mut self.scene);
 
         let paint_jobs = ctx.tessellate(output.shapes, output.pixels_per_point);
         let screen = egui_wgpu::ScreenDescriptor {
@@ -196,11 +356,6 @@ impl WindowState {
         let view = target
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("frame"),
-            });
 
         // Fonts need their textures before the egui pass. Drain, so the Drop
         // guard sees both collections empty.
@@ -211,10 +366,12 @@ impl WindowState {
             }
         }
 
-        // The vertex-pull path uploads the bodies it draws. The camera moves
-        // every frame, so the uniform rewrites every frame with it.
-        let gpu_render = app.mode == PhysicsMode::Newton && app.tuning.gpu_render;
-        if gpu_render {
+        // The vertex-pull path uploads the bodies it draws while the CPU
+        // stays authoritative. The camera moves every frame, so the uniform
+        // rewrites every frame with it. Residency skips the upload: the
+        // draw reads the physics buffer instead.
+        let gpu_render = (app.mode == PhysicsMode::Newton && app.tuning.gpu_render) || gpu_stepped;
+        if gpu_render && !gpu_stepped {
             let cam_uniforms = CamUniforms::new(&app.cam, w, h);
             self.renderer.upload_bodies(
                 &self.device,
@@ -222,6 +379,10 @@ impl WindowState {
                 &cam_uniforms,
                 &app.world.bodies,
             );
+        }
+        if gpu_stepped {
+            let cam_uniforms = CamUniforms::new(&app.cam, w, h);
+            self.renderer.write_cam(&self.queue, &cam_uniforms);
         }
 
         // The particles and lines clear the target.
@@ -270,7 +431,19 @@ impl WindowState {
             self.egui_paint.free_texture(&id);
         }
 
+        // The resolve rides the same submission, before the finish.
+        if gpu_stepped && let Some(set) = &self.ts_set {
+            encoder.resolve_query_set(set, 0..6, &self.ts_resolve, 0);
+            encoder.copy_buffer_to_buffer(&self.ts_resolve, 0, &self.ts_stage, 0, 6 * 8);
+        }
         self.queue.submit([encoder.finish()]);
+        if gpu_stepped {
+            // The poll waits for the whole frame, so the panel reads real
+            // numbers and the old synchronous frame shape stays.
+            self.queue.present(target);
+            self.read_gpu_feedback(app);
+            return;
+        }
         self.queue.present(target);
     }
 }

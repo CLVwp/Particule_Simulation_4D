@@ -141,8 +141,8 @@ impl GpuState {
         }
     }
 
-    /// Reads the table and the body ids back. Test-only, like
-    /// [`GpuState::download_bodies`].
+    /// Reads the table and the body ids back. Test-only.
+    #[cfg(test)]
     pub(crate) fn download_grid(
         &self,
         device: &wgpu::Device,

@@ -12,8 +12,8 @@ mod bodies;
 mod fluid;
 mod lines;
 
-use self::bodies::{MERGE_RADIUS_PX, MERGE_TILE_FILL, MERGE_TILE_PX};
 pub(crate) use self::bodies::emit_bodies;
+use self::bodies::{MERGE_RADIUS_PX, MERGE_TILE_FILL, MERGE_TILE_PX};
 
 /// Body colors shared with the GPU vertex-pull path.
 pub(crate) use self::bodies::{BODY_LIGHT, BODY_SAT, CUBE_HUE, SPHERE_HUE};
@@ -116,6 +116,10 @@ pub struct Tuning {
     pub(crate) density_cutoff: f32,
     /// Draw bodies straight from the GPU storage buffer.
     pub(crate) gpu_render: bool,
+    /// Step the physics on the GPU above the body threshold.
+    pub(crate) gpu_physics: bool,
+    /// Body count where the GPU physics takes over.
+    pub(crate) gpu_threshold: usize,
 }
 
 impl Default for Tuning {
@@ -128,6 +132,8 @@ impl Default for Tuning {
             cull_offscreen: true,
             density_cutoff: DENSITY_CUTOFF,
             gpu_render: true,
+            gpu_physics: false,
+            gpu_threshold: 100_000,
         }
     }
 }
@@ -135,7 +141,7 @@ impl Default for Tuning {
 impl App {
     /// Fills `out` with this frame's instances and lines. Empties every list
     /// first, so their capacity stays reused between frames.
-    pub(crate) fn build_scene(&mut self, w: f32, h: f32, out: &mut SceneOut) {
+    pub(crate) fn build_scene(&mut self, w: f32, h: f32, gpu_draw: bool, out: &mut SceneOut) {
         let scene = Instant::now();
         out.instances.clear();
         out.lines.clear();
@@ -146,8 +152,9 @@ impl App {
         match self.mode {
             PhysicsMode::Newton => {
                 // The GPU path draws bodies straight from the storage
-                // buffer. The CPU instance stream stays empty.
-                if !self.tuning.gpu_render {
+                // buffer. The CPU instance stream stays empty. Residency
+                // forces the GPU draw: the CPU copy is stale.
+                if !self.tuning.gpu_render && !gpu_draw {
                     emit_bodies(
                         &self.cam,
                         &self.world.bodies,

@@ -619,6 +619,90 @@ impl GpuState {
         queue.write_buffer(&self.sim_buf, 0, bytemuck::bytes_of(sim));
     }
 
+    /// The body storage for the render bind group while the physics stays
+    /// resident.
+    pub(crate) fn render_buffer(&self) -> &wgpu::Buffer {
+        &self.bodies_buf
+    }
+
+    /// Uploads only the spawned tail. The CPU owns the fresh bodies, and
+    /// the resident ones never moved on the CPU side.
+    pub(crate) fn upload_tail(&self, queue: &wgpu::Queue, bodies: &[GpuBody], from: usize) {
+        if from < bodies.len() {
+            let bytes = bytemuck::cast_slice(&bodies[from..]);
+            queue.write_buffer(&self.bodies_buf, from as u64 * GPU_BODY_SIZE, bytes);
+        }
+    }
+
+    /// Copies one u32 out of a storage buffer. Readback helper.
+    fn read_u32_at(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        source: &wgpu::Buffer,
+        byte_offset: u64,
+    ) -> u32 {
+        let stage = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("u32 readback"),
+            size: 4,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder =
+            device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        encoder.copy_buffer_to_buffer(source, byte_offset, &stage, 0, 4);
+        queue.submit([encoder.finish()]);
+        device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("readback poll fails");
+        stage.slice(..).map_async(wgpu::MapMode::Read, |_| {});
+        device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("readback map poll fails");
+        let out = {
+            let view = stage.get_mapped_range(..).expect("map fails");
+            let bytes: Vec<u8> = view.to_vec();
+            u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
+        };
+        stage.unmap();
+        out
+    }
+
+    /// Pairs found and pairs dropped by the last recorded frame. Two
+    /// synchronous polls, so the frame loop calls this at most once.
+    pub(crate) fn pair_counters(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        n: usize,
+    ) -> (u32, u32) {
+        let total = Self::read_u32_at(device, queue, &self.pair_start_buf, n as u64 * 4);
+        let dropped = total.saturating_sub(self.pairs_capacity);
+        (total, dropped)
+    }
+
+    /// The timestamp query set for the six phase boundaries, or `None`
+    /// without the feature.
+    pub(crate) fn timestamp_set(device: &wgpu::Device) -> Option<wgpu::QuerySet> {
+        if !device.features().contains(wgpu::Features::TIMESTAMP_QUERY) {
+            return None;
+        }
+        Some(device.create_query_set(&wgpu::QuerySetDescriptor {
+            label: Some("physics phase timestamps"),
+            ty: wgpu::QueryType::Timestamp,
+            count: 6,
+        }))
+    }
+
+    /// The resolve buffer that turns the six timestamps into ns ticks.
+    pub(crate) fn timestamp_resolve(device: &wgpu::Device) -> wgpu::Buffer {
+        device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("physics phase resolve"),
+            size: 6 * 8,
+            usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        })
+    }
+
     /// Uploads the bodies. Recreates the storage only on growth.
     pub(crate) fn upload_bodies(
         &mut self,
@@ -751,13 +835,14 @@ impl GpuState {
 
     /// Records the integrate pass and the floor pass. Two passes, so the
     /// pass boundary orders the memory between the kernels.
+    #[cfg(test)]
     pub(crate) fn record_integrate_floor(&self, encoder: &mut wgpu::CommandEncoder, n: usize) {
         self.record_integrate(encoder, n);
         self.record_floor(encoder, n);
     }
 
     /// Reads the bodies back. One staging buffer per call; the frame loop
-    /// never calls this, only the parity tests do.
+    /// never calls this, only the parity tests and the residency exit do.
     // ponytail: per-call staging; a ring of two when the F1 count readback lands
     pub(crate) fn download_bodies(
         &self,

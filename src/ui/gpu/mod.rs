@@ -10,14 +10,12 @@ use crate::ui::camera::Camera;
 use crate::ui::scene::{BODY_LIGHT, BODY_SAT, CUBE_HUE, NEAR, SPHERE_HUE};
 use crate::ui::theme::hsla_to_rgba;
 
-#[cfg(test)]
 mod grid;
-#[cfg(test)]
 mod pairs;
-#[cfg(test)]
 mod physics;
-#[cfg(test)]
 mod solve;
+
+pub(crate) use self::physics::{GpuState, SimUniforms, TABLE_MASK};
 
 /// Builds one offscreen device for the GPU test modules. Returns `None`
 /// without an adapter, so machines without Vulkan or DirectX skip.

@@ -84,24 +84,38 @@ impl GpuState {
     }
 
     /// Records one full step in the CPU phase order: integrate, grid,
-    /// pairs, solve, floor.
+    /// pairs, solve, floor. `ts` takes six timestamp slots and measures
+    /// the five phases when the adapter supports the queries.
     pub(crate) fn record_full_step(
         &self,
         encoder: &mut wgpu::CommandEncoder,
         n: usize,
         rounds: usize,
+        ts: Option<&wgpu::QuerySet>,
     ) {
+        let stamp = |encoder: &mut wgpu::CommandEncoder, index: u32| {
+            if let Some(set) = ts {
+                encoder.write_timestamp(set, index);
+            }
+        };
+        stamp(encoder, 0);
         self.record_integrate(encoder, n);
+        stamp(encoder, 1);
         self.record_grid_build(encoder, n);
+        stamp(encoder, 2);
         self.record_pair_pass(encoder, n);
+        stamp(encoder, 3);
         self.record_solve_pass(encoder, n, rounds);
+        stamp(encoder, 4);
         self.record_floor(encoder, n);
+        stamp(encoder, 5);
     }
 }
 
 impl GpuState {
     /// Reads the per-body CSR starts and the tagged item list back.
-    /// Test-only, like the other download helpers.
+    /// Test-only.
+    #[cfg(test)]
     pub(crate) fn download_csr(
         &self,
         device: &wgpu::Device,
@@ -217,7 +231,7 @@ mod tests {
             let mut encoder =
                 device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
             for _ in 0..count {
-                state.record_full_step(&mut encoder, n, sim.rounds.max(1) as usize);
+                state.record_full_step(&mut encoder, n, sim.rounds.max(1) as usize, None);
             }
             queue.submit([encoder.finish()]);
             device

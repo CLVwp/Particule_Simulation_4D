@@ -137,6 +137,12 @@ pub(crate) struct App {
     pub(crate) tuning: Tuning,
     /// GPU adapter name. Set after wgpu init.
     pub(crate) adapter_info: String,
+    /// Per-phase GPU step times, one frame late. Zero while CPU runs.
+    pub(crate) gpu_phase_ms: [f32; 5],
+    /// Pairs the GPU found, one frame late.
+    pub(crate) gpu_pairs: u32,
+    /// Pairs the pair budget dropped, one frame late.
+    pub(crate) gpu_dropped: u32,
     /// Time of the previous frame. Drives the move scale.
     last_frame: Option<Instant>,
 }
@@ -170,6 +176,9 @@ impl App {
             tiles: TileCache::default(),
             tuning: Tuning::default(),
             adapter_info: "unknown".to_string(),
+            gpu_phase_ms: [0.0; 5],
+            gpu_pairs: 0,
+            gpu_dropped: 0,
             last_frame: None,
         }
     }
@@ -179,7 +188,10 @@ impl App {
     /// [`App::time_scale`]. The step runs only in the viewport, and only
     /// while the sim is not paused.
     // ponytail: fixed dt decoupled from real time; wall-clock dt if physics gets speed-sensitive
-    pub(crate) fn step_physics(&mut self) {
+    /// Smooths the fps, applies the camera moves, and advances the frame
+    /// clock. The physics branch calls this before its own step.
+    // ponytail: fixed dt decoupled from real time; wall-clock dt if physics gets speed-sensitive
+    pub(crate) fn tick_frame(&mut self) {
         let now = Instant::now();
         let dt = match self.last_frame {
             Some(last) => now.duration_since(last).as_secs_f32(),
@@ -192,6 +204,10 @@ impl App {
         // The camera slide scales with the frame rate. Physics does not.
         let scale = (dt / FIXED_DT).clamp(0.25, 4.0);
         apply_moves(&self.input, &mut self.cam, scale);
+    }
+
+    pub(crate) fn step_physics(&mut self) {
+        self.tick_frame();
         // The sim waits behind the menu, and pause holds the step.
         if self.page != Page::Sim || self.paused {
             return;

@@ -3,8 +3,8 @@
 use std::mem::size_of;
 use std::num::NonZeroU64;
 
-use bytemuck::{Pod, Zeroable};
 use crate::engine::Body;
+use bytemuck::{Pod, Zeroable};
 
 use crate::ui::gpu::{CamUniforms, GpuBody};
 use crate::ui::scene::{Instance, LineVert};
@@ -82,6 +82,10 @@ pub(crate) struct Renderer {
     bind_group_bodies: wgpu::BindGroup,
     /// Reused mirror of the body list. Filled by [`Self::upload_bodies`].
     gpu_scratch: Vec<GpuBody>,
+    /// Bind group and body count when the physics keeps the bodies
+    /// resident in its own buffer. The draw uses this instead of the
+    /// uploaded copy.
+    external_bodies: Option<(wgpu::BindGroup, u32)>,
 }
 
 impl Renderer {
@@ -346,6 +350,7 @@ impl Renderer {
             bodies_uploaded: 0,
             bind_group_bodies,
             gpu_scratch: Vec::new(),
+            external_bodies: None,
         }
     }
 
@@ -424,6 +429,50 @@ impl Renderer {
         queue.write_buffer(buffer, 0, data);
     }
 
+    /// Writes the camera uniform for the vertex-pull path.
+    pub(crate) fn write_cam(&mut self, queue: &wgpu::Queue, cam: &CamUniforms) {
+        queue.write_buffer(&self.cam_buf, 0, bytemuck::bytes_of(cam));
+    }
+
+    /// Points the vertex-pull draw at the physics body buffer. The
+    /// physics stays resident, so the uploaded copy would draw stale
+    /// positions.
+    pub(crate) fn use_external_bodies(
+        &mut self,
+        device: &wgpu::Device,
+        buffer: &wgpu::Buffer,
+        n: u32,
+    ) {
+        let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("external bodies bind group"),
+            layout: &self.bgl_bodies,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                        buffer: &self.cam_buf,
+                        offset: 0,
+                        size: None,
+                    }),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                        buffer,
+                        offset: 0,
+                        size: None,
+                    }),
+                },
+            ],
+        });
+        self.external_bodies = Some((group, n));
+    }
+
+    /// Drops the external override. The physics left the GPU.
+    pub(crate) fn clear_external_bodies(&mut self) {
+        self.external_bodies = None;
+    }
+
     /// Records the instance pass and the line pass into the encoder.
     /// The pass clears `target` to the background color. egui paints after.
     /// Sizes are physical pixels.
@@ -494,12 +543,20 @@ impl Renderer {
             multiview_mask: None,
         });
 
-        if bodies_gpu && self.bodies_uploaded > 0 {
-            pass.set_pipeline(&self.pipeline_bodies);
-            pass.set_bind_group(0, &self.bind_group_bodies, &[]);
-            // Six corners per quad come from vertex_index, one body per
-            // instance comes from instance_index. No vertex buffers.
-            pass.draw(0..6, 0..self.bodies_uploaded);
+        if bodies_gpu {
+            if let Some((group, n)) = &self.external_bodies {
+                if *n > 0 {
+                    pass.set_pipeline(&self.pipeline_bodies);
+                    pass.set_bind_group(0, group, &[]);
+                    // Six corners per quad come from vertex_index, one
+                    // body per instance comes from instance_index.
+                    pass.draw(0..6, 0..*n);
+                }
+            } else if self.bodies_uploaded > 0 {
+                pass.set_pipeline(&self.pipeline_bodies);
+                pass.set_bind_group(0, &self.bind_group_bodies, &[]);
+                pass.draw(0..6, 0..self.bodies_uploaded);
+            }
         } else if !instances.is_empty() {
             pass.set_pipeline(&self.pipeline_instances);
             pass.set_bind_group(0, &self.bind_group, &[]);
@@ -520,9 +577,9 @@ impl Renderer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::Shape;
     use crate::ui::camera::Camera;
     use crate::ui::scene::Instance;
-    use crate::engine::Shape;
 
     /// Builds one offscreen device. Returns `None` without an adapter.
     fn headless_device() -> Option<(wgpu::Device, wgpu::Queue)> {
