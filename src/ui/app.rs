@@ -249,10 +249,12 @@ impl WindowState {
         if self.gpu_resident && app.world.bodies.len() != self.gpu_n {
             if app.world.bodies.len() > self.gpu_n {
                 // A spawn while resident: the CPU owns only the fresh tail.
+                // The resident bodies never move on the CPU, so rewriting
+                // the whole buffer from the mirror would teleport them.
                 let mirror: Vec<GpuBody> =
                     app.world.bodies.iter().map(GpuBody::from_body).collect();
                 let from = self.gpu_n;
-                self.gpu.upload_bodies(&self.device, &self.queue, &mirror);
+                self.gpu.grow_to(&self.device, mirror.len());
                 self.gpu.upload_tail(&self.queue, &mirror, from);
                 self.gpu_n = mirror.len();
                 self.renderer.use_external_bodies(

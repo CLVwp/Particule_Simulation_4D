@@ -710,41 +710,50 @@ impl GpuState {
         queue: &wgpu::Queue,
         bodies: &[GpuBody],
     ) {
-        if bodies.len() as u64 > self.bodies_capacity as u64 {
+        self.grow_to(device, bodies.len());
+        if !bodies.is_empty() {
+            queue.write_buffer(&self.bodies_buf, 0, bytemuck::cast_slice(bodies));
+        }
+    }
+
+    /// Grows every body-scaled buffer to `n` bodies and rebuilds the bind
+    /// groups, without writing a byte. The caller uploads what it owns.
+    pub(crate) fn grow_to(&mut self, device: &wgpu::Device, n: usize) {
+        if n as u64 > self.bodies_capacity as u64 {
             self.bodies_buf = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("physics bodies"),
-                size: bodies.len() as u64 * GPU_BODY_SIZE,
+                size: n as u64 * GPU_BODY_SIZE,
                 usage: wgpu::BufferUsages::COPY_DST
                     | wgpu::BufferUsages::COPY_SRC
                     | wgpu::BufferUsages::STORAGE,
                 mapped_at_creation: false,
             });
-            self.bodies_capacity = bodies.len() as u32;
+            self.bodies_capacity = n as u32;
             // The id list matches the body count one to one.
-            if bodies.len() as u64 > self.body_ids_capacity as u64 {
+            if n as u64 > self.body_ids_capacity as u64 {
                 self.body_ids_buf = device.create_buffer(&wgpu::BufferDescriptor {
                     label: Some("grid body ids"),
-                    size: bodies.len() as u64 * U32_SIZE,
+                    size: n as u64 * U32_SIZE,
                     usage: wgpu::BufferUsages::COPY_DST
                         | wgpu::BufferUsages::COPY_SRC
                         | wgpu::BufferUsages::STORAGE,
                     mapped_at_creation: false,
                 });
-                self.body_ids_capacity = bodies.len() as u32;
+                self.body_ids_capacity = n as u32;
             }
             // The cell cache matches the body count one to one.
-            if bodies.len() as u64 > self.cells_capacity as u64 {
+            if n as u64 > self.cells_capacity as u64 {
                 self.cells_buf = device.create_buffer(&wgpu::BufferDescriptor {
                     label: Some("body cells"),
-                    size: bodies.len() as u64 * CELL_SIZE,
+                    size: n as u64 * CELL_SIZE,
                     usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::STORAGE,
                     mapped_at_creation: false,
                 });
-                self.cells_capacity = bodies.len() as u32;
+                self.cells_capacity = n as u32;
             }
             // The pair budget scales with the body count, capped flat. The
             // per-body lists and the deltas scale with the pair budget.
-            let want_pairs = ((bodies.len() as u64) * PAIRS_PER_BODY).min(PAIRS_CAP_MAX) as u32;
+            let want_pairs = ((n as u64) * PAIRS_PER_BODY).min(PAIRS_CAP_MAX) as u32;
             if want_pairs > self.pairs_capacity {
                 self.pairs_buf = device.create_buffer(&wgpu::BufferDescriptor {
                     label: Some("pairs"),
@@ -797,9 +806,6 @@ impl GpuState {
                 &self.bc_cursor_buf,
                 &self.bc_items_buf,
             );
-        }
-        if !bodies.is_empty() {
-            queue.write_buffer(&self.bodies_buf, 0, bytemuck::cast_slice(bodies));
         }
     }
 
