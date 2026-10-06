@@ -13,6 +13,8 @@ use crate::ui::theme::hsla_to_rgba;
 #[cfg(test)]
 mod grid;
 #[cfg(test)]
+mod pairs;
+#[cfg(test)]
 mod physics;
 
 /// Builds one offscreen device for the GPU test modules. Returns `None`

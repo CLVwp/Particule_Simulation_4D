@@ -5,24 +5,6 @@
 // Slice sums. One entry per 256-entry slice.
 const SLICES: u32 = 16384u;
 
-struct Sim {
-    dt: f32,
-    gravity: f32,
-    cell_size: f32,
-    floor_restitution: f32,
-    ground_friction: f32,
-    pair_restitution: f32,
-    pair_friction: f32,
-    slop: f32,
-    correction: f32,
-    max_speed: f32,
-    floor_y: f32,
-    pad: f32,
-    n: u32,
-    rounds: u32,
-    table_mask: u32,
-    pair_cap: u32,
-}
 
 
 @group(0) @binding(0) var<storage, read_write> data: array<u32>;

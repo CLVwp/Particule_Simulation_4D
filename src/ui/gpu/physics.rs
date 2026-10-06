@@ -17,6 +17,13 @@ use super::GpuBody;
 const GPU_BODY_SIZE: u64 = size_of::<GpuBody>() as u64;
 /// One u32, in bytes.
 const U32_SIZE: u64 = 4;
+/// One contact pair, in bytes: two indices and two masses.
+pub(super) const PAIR_SIZE: u64 = 16;
+/// Pair slots the GPU path budgets per body, capped flat. Eight sits well
+/// above any settled pile the app spawns.
+pub(super) const PAIRS_PER_BODY: u64 = 8;
+/// Hard cap on pair slots. At 16 bytes this is 96 MB of GPU memory.
+pub(super) const PAIRS_CAP_MAX: u64 = 6_000_000;
 
 /// One buffer layout entry for the compute stages. `uniform` picks the
 /// binding type, `min_size` pins the shader-side struct size.
@@ -69,7 +76,9 @@ fn pair_bind(
     })
 }
 
-/// Binds the grid kernels: bodies, sim, table, cursor, ids.
+/// Binds the grid and pair kernels: bodies, sim, table, cursor, ids, the
+/// pair CSR, and the flat pair list.
+#[expect(clippy::too_many_arguments)] // one buffer per binding, fixed by the layout
 fn grid_bind(
     device: &wgpu::Device,
     bgl: &wgpu::BindGroupLayout,
@@ -78,6 +87,8 @@ fn grid_bind(
     table: &wgpu::Buffer,
     cursor: &wgpu::Buffer,
     body_ids: &wgpu::Buffer,
+    pair_start: &wgpu::Buffer,
+    pairs: &wgpu::Buffer,
 ) -> wgpu::BindGroup {
     device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("grid bind group"),
@@ -102,6 +113,14 @@ fn grid_bind(
             wgpu::BindGroupEntry {
                 binding: 4,
                 resource: buf_res(body_ids),
+            },
+            wgpu::BindGroupEntry {
+                binding: 5,
+                resource: buf_res(pair_start),
+            },
+            wgpu::BindGroupEntry {
+                binding: 6,
+                resource: buf_res(pairs),
             },
         ],
     })
@@ -170,8 +189,8 @@ pub(crate) struct SimUniforms {
     pub(crate) max_speed: f32,
     /// Height of the floor plane.
     pub(crate) floor_y: f32,
-    /// Never read.
-    pub(crate) pad: f32,
+    /// One as f32 keeps the overlap prune on. Zero accepts every candidate.
+    pub(crate) prune: f32,
     /// Body count the kernels run over.
     pub(crate) n: u32,
     /// Solve rounds per step. Unused here.
@@ -187,8 +206,8 @@ const _: () = assert!(size_of::<SimUniforms>() == 64);
 
 impl SimUniforms {
     /// Packs the settings one step needs. `cell_size` feeds the grid
-    /// kernels, `table_mask` folds buckets into the table. The pair-pass
-    /// fields stay zero until that phase lands on the GPU.
+    /// kernels, `table_mask` folds buckets into the table, `pair_cap`
+    /// clips the flat pair list.
     pub(crate) fn new(
         settings: &SimSettings,
         dt: f32,
@@ -208,11 +227,11 @@ impl SimUniforms {
             correction: 0.0,
             max_speed: settings.max_speed,
             floor_y: FLOOR_Y,
-            pad: 0.0,
+            prune: if settings.prune_dead_pairs { 1.0 } else { 0.0 },
             n: n as u32,
             rounds: settings.resolve_rounds as u32,
             table_mask,
-            pair_cap: 0,
+            pair_cap: ((n as u64) * PAIRS_PER_BODY).min(PAIRS_CAP_MAX) as u32,
         }
     }
 }
@@ -242,6 +261,14 @@ pub(crate) struct GpuState {
     pub(super) bgl_grid: wgpu::BindGroupLayout,
     pub(super) bind_grid: wgpu::BindGroup,
     pub(super) bind_scan: wgpu::BindGroup,
+    /// CSR slot per body: count, then exclusive start after the scan.
+    pub(super) pair_start_buf: wgpu::Buffer,
+    /// Flat contact pairs, `pairs_capacity` slots of 16 bytes.
+    pub(super) pairs_buf: wgpu::Buffer,
+    /// Pair slots the pair buffer holds.
+    pub(super) pairs_capacity: u32,
+    /// Scan bind group over the pair CSR instead of the grid table.
+    pub(super) bind_scan_pairs: wgpu::BindGroup,
     /// Pipelines from [`super::grid::GridKernels`].
     pub(super) kernels: super::grid::GridKernels,
 }
@@ -356,6 +383,8 @@ impl GpuState {
                 grid_entry(2, false, U32_SIZE),
                 grid_entry(3, false, U32_SIZE),
                 grid_entry(4, false, U32_SIZE),
+                grid_entry(5, false, U32_SIZE),
+                grid_entry(6, false, PAIR_SIZE),
             ],
         });
         let bgl_scan = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -367,6 +396,26 @@ impl GpuState {
         });
         let kernels = super::grid::GridKernels::new(device, &bgl_grid, &bgl_scan);
 
+        // Pair pass scratch. The CSR runs over a fixed region, so the scan
+        // dispatch counts stay constant; bodies past the region cannot use
+        // the GPU pair pass.
+        let pair_start_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("pair start"),
+            size: TABLE_SIZE as u64 * U32_SIZE,
+            usage: wgpu::BufferUsages::COPY_DST
+                | wgpu::BufferUsages::COPY_SRC
+                | wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
+        let pairs_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("pairs"),
+            size: PAIR_SIZE,
+            usage: wgpu::BufferUsages::COPY_DST
+                | wgpu::BufferUsages::COPY_SRC
+                | wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
+
         let bind_grid = grid_bind(
             device,
             &bgl_grid,
@@ -375,8 +424,11 @@ impl GpuState {
             &table_buf,
             &cursor_buf,
             &body_ids_buf,
+            &pair_start_buf,
+            &pairs_buf,
         );
         let bind_scan = scan_bind(device, &bgl_scan, &table_buf, &aux_buf);
+        let bind_scan_pairs = scan_bind(device, &bgl_scan, &pair_start_buf, &aux_buf);
 
         GpuState {
             pipeline_integrate,
@@ -393,6 +445,10 @@ impl GpuState {
             bgl_grid,
             bind_grid,
             bind_scan,
+            pair_start_buf,
+            pairs_buf,
+            pairs_capacity: 1,
+            bind_scan_pairs,
             kernels,
         }
     }
@@ -431,6 +487,19 @@ impl GpuState {
                 });
                 self.body_ids_capacity = bodies.len() as u32;
             }
+            // The pair budget scales with the body count, capped flat.
+            let want_pairs = ((bodies.len() as u64) * PAIRS_PER_BODY).min(PAIRS_CAP_MAX) as u32;
+            if want_pairs > self.pairs_capacity {
+                self.pairs_buf = device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("pairs"),
+                    size: want_pairs as u64 * PAIR_SIZE,
+                    usage: wgpu::BufferUsages::COPY_DST
+                        | wgpu::BufferUsages::COPY_SRC
+                        | wgpu::BufferUsages::STORAGE,
+                    mapped_at_creation: false,
+                });
+                self.pairs_capacity = want_pairs;
+            }
             // The old bind groups point at the dropped buffers. Rebuild.
             self.bind_group = pair_bind(device, &self.bgl, &self.bodies_buf, &self.sim_buf);
             self.bind_grid = grid_bind(
@@ -441,6 +510,8 @@ impl GpuState {
                 &self.table_buf,
                 &self.cursor_buf,
                 &self.body_ids_buf,
+                &self.pair_start_buf,
+                &self.pairs_buf,
             );
         }
         if !bodies.is_empty() {

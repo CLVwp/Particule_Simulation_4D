@@ -7,19 +7,21 @@ use super::physics::{SCAN_SLICES, TABLE_SIZE, WORKGROUP};
 /// under the 65535 group limit.
 const SORT_WORKGROUP: u32 = 256;
 
-/// The six grid kernels, built once per device.
+/// The eight grid and pair kernels, built once per device.
 pub(crate) struct GridKernels {
-    hist: wgpu::ComputePipeline,
-    scatter: wgpu::ComputePipeline,
-    sort: wgpu::ComputePipeline,
-    scan_level1: wgpu::ComputePipeline,
-    scan_sums: wgpu::ComputePipeline,
-    scan_apply: wgpu::ComputePipeline,
+    pub(super) hist: wgpu::ComputePipeline,
+    pub(super) scatter: wgpu::ComputePipeline,
+    pub(super) sort: wgpu::ComputePipeline,
+    pub(super) scan_level1: wgpu::ComputePipeline,
+    pub(super) scan_sums: wgpu::ComputePipeline,
+    pub(super) scan_apply: wgpu::ComputePipeline,
+    pub(super) pair_count: wgpu::ComputePipeline,
+    pub(super) pair_fill: wgpu::ComputePipeline,
 }
 
 impl GridKernels {
-    /// Builds the pipelines. `bgl_grid` carries the five grid bindings,
-    /// `bgl_scan` the data and sums pair.
+    /// Builds the pipelines. `bgl_grid` carries the seven grid and pair
+    /// bindings, `bgl_scan` the data and sums pair.
     pub(crate) fn new(
         device: &wgpu::Device,
         bgl_grid: &wgpu::BindGroupLayout,
@@ -32,6 +34,10 @@ impl GridKernels {
         let scan_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("scan.wgsl"),
             source: wgpu::ShaderSource::Wgsl(include_str!("scan.wgsl").into()),
+        });
+        let pairs_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("pairs.wgsl"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("pairs.wgsl").into()),
         });
         let layout = |label: &'static str, bgl: &wgpu::BindGroupLayout| {
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -67,6 +73,8 @@ impl GridKernels {
             scan_level1: kernel("scan level 1", "scan_level1", &scan_shader, &scan_layout),
             scan_sums: kernel("scan sums", "scan_sums", &scan_shader, &scan_layout),
             scan_apply: kernel("scan apply", "scan_apply", &scan_shader, &scan_layout),
+            pair_count: kernel("pair count", "pair_count", &pairs_shader, &grid_layout),
+            pair_fill: kernel("pair fill", "pair_fill", &pairs_shader, &grid_layout),
         }
     }
 }

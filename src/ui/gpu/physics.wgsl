@@ -21,7 +21,7 @@ struct Sim {
     correction: f32,
     max_speed: f32,
     floor_y: f32,
-    pad: f32,
+    prune: f32,
     n: u32,
     rounds: u32,
     table_mask: u32,
