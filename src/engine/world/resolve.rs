@@ -68,11 +68,7 @@ fn contact_delta(a: &Body, b: &Body, c: &Contact, rest: f32, friction: f32) -> C
     };
     // Tangential share of the relative velocity, and the friction impulse
     // that removes the configured share of it. Zero friction costs one dot.
-    let vt = [
-        rv[0] - vn * n[0],
-        rv[1] - vn * n[1],
-        rv[2] - vn * n[2],
-    ];
+    let vt = [rv[0] - vn * n[0], rv[1] - vn * n[1], rv[2] - vn * n[2]];
     let vt2 = vt[0] * vt[0] + vt[1] * vt[1] + vt[2] * vt[2];
     let (t, jt) = if friction > 0.0 && vt2 > 1e-18 {
         let vt_len = vt2.sqrt();

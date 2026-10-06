@@ -169,10 +169,7 @@ mod tests {
             a.step(1.0 / 60.0);
             b.step(1.0 / 60.0);
         }
-        assert!(
-            max_pos_diff(&a, &b) == 0.0,
-            "shape changed the trajectory"
-        );
+        assert!(max_pos_diff(&a, &b) == 0.0, "shape changed the trajectory");
     }
 
     #[test]
@@ -322,7 +319,10 @@ mod tests {
         let free = slide(0.0);
         let gripped = slide(0.5);
         assert!(free > 1.5, "frictionless slide must persist: {free}");
-        assert!(gripped < free, "friction must slow the slide: {gripped} vs {free}");
+        assert!(
+            gripped < free,
+            "friction must slow the slide: {gripped} vs {free}"
+        );
     }
 
     #[test]
