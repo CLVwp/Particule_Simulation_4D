@@ -29,6 +29,23 @@ The skill is linked at `.claude/skills/rust-skills`. The files live at `.agents/
   scene: a dense pile stresses contacts, a sparse scene stresses grid
   and scene build. Read the F1 table or the phase table first.
 
+## GPU compute protocol — `ui/gpu` work
+
+- Verify GPU physics with
+  `cargo test --release --lib ui::gpu -- --nocapture`. The parity gaps
+  must stay at 0.0. The phase table still guards the CPU path.
+- One kernel per compute pass. The pass boundary is the memory barrier.
+  Two kernels in one pass have no order guarantee on the writes.
+- Storage structs use flat `[f32; 3]` arrays. A `vec3` forces align 16
+  and grows the stride to 48 bytes. Uniform structs stay flat scalars,
+  sixteen floats at most per 64-byte block. Pin every GPU struct with a
+  static size assert, on both sides.
+- The GPU grid hashes the cell triple, not the packed 63-bit key. WGSL
+  has no 64-bit integers. Exact cell checks reject hash collisions.
+- wgpu 30 traps: `get_mapped_range` returns a `Result`, and its view
+  owns the map. Drop the view inside a block before `unmap`.
+  `NonZeroU64` comes from `std::num`, not from `wgpu`.
+
 ## Documentation rule — ASD-STE100 (absolute)
 
 All documentation in this repo obeys ASD-STE100 (Simplified Technical English):

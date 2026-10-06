@@ -11,7 +11,35 @@ use crate::ui::scene::{BODY_LIGHT, BODY_SAT, CUBE_HUE, NEAR, SPHERE_HUE};
 use crate::ui::theme::hsla_to_rgba;
 
 #[cfg(test)]
+mod grid;
+#[cfg(test)]
 mod physics;
+
+/// Builds one offscreen device for the GPU test modules. Returns `None`
+/// without an adapter, so machines without Vulkan or DirectX skip.
+#[cfg(test)]
+pub(crate) fn headless_device() -> Option<(wgpu::Device, wgpu::Queue)> {
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+        backends: wgpu::Backends::all(),
+        ..wgpu::InstanceDescriptor::new_without_display_handle()
+    });
+    let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+        power_preference: wgpu::PowerPreference::HighPerformance,
+        ..Default::default()
+    }))
+    .ok()?;
+    Some(
+        pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            label: None,
+            required_features: wgpu::Features::default(),
+            required_limits: wgpu::Limits::default(),
+            experimental_features: wgpu::ExperimentalFeatures::disabled(),
+            memory_hints: wgpu::MemoryHints::default(),
+            trace: wgpu::Trace::Off,
+        }))
+        .expect("device request fails"),
+    )
+}
 
 /// One body in the GPU storage buffer. Exactly 32 bytes. Flat arrays: a
 /// `vec3` would force align 16 and grow the stride to 48 bytes.

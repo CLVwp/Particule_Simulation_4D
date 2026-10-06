@@ -15,8 +15,133 @@ use super::GpuBody;
 
 /// One body per 32-byte slot, same as [`GpuBody`].
 const GPU_BODY_SIZE: u64 = size_of::<GpuBody>() as u64;
+/// One u32, in bytes.
+const U32_SIZE: u64 = 4;
+
+/// One buffer layout entry for the compute stages. `uniform` picks the
+/// binding type, `min_size` pins the shader-side struct size.
+fn grid_entry(binding: u32, uniform: bool, min_size: u64) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::COMPUTE,
+        ty: wgpu::BindingType::Buffer {
+            ty: if uniform {
+                wgpu::BufferBindingType::Uniform
+            } else {
+                wgpu::BufferBindingType::Storage { read_only: false }
+            },
+            has_dynamic_offset: false,
+            min_binding_size: Some(NonZeroU64::new(min_size).expect("size is not zero")),
+        },
+        count: None,
+    }
+}
+
+/// One whole-buffer binding resource.
+fn buf_res(b: &wgpu::Buffer) -> wgpu::BindingResource<'_> {
+    wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+        buffer: b,
+        offset: 0,
+        size: None,
+    })
+}
+
+/// Binds the integrate and floor kernels: bodies plus sim.
+fn pair_bind(
+    device: &wgpu::Device,
+    bgl: &wgpu::BindGroupLayout,
+    bodies: &wgpu::Buffer,
+    sim: &wgpu::Buffer,
+) -> wgpu::BindGroup {
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("physics bind group"),
+        layout: bgl,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: buf_res(bodies),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: buf_res(sim),
+            },
+        ],
+    })
+}
+
+/// Binds the grid kernels: bodies, sim, table, cursor, ids.
+fn grid_bind(
+    device: &wgpu::Device,
+    bgl: &wgpu::BindGroupLayout,
+    bodies: &wgpu::Buffer,
+    sim: &wgpu::Buffer,
+    table: &wgpu::Buffer,
+    cursor: &wgpu::Buffer,
+    body_ids: &wgpu::Buffer,
+) -> wgpu::BindGroup {
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("grid bind group"),
+        layout: bgl,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: buf_res(bodies),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: buf_res(sim),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: buf_res(table),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: buf_res(cursor),
+            },
+            wgpu::BindGroupEntry {
+                binding: 4,
+                resource: buf_res(body_ids),
+            },
+        ],
+    })
+}
+
+/// Binds the scan kernels: the data array plus the sums array.
+fn scan_bind(
+    device: &wgpu::Device,
+    bgl: &wgpu::BindGroupLayout,
+    data: &wgpu::Buffer,
+    sums: &wgpu::Buffer,
+) -> wgpu::BindGroup {
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("scan bind group"),
+        layout: bgl,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: buf_res(data),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: buf_res(sums),
+            },
+        ],
+    })
+}
 /// Threads per compute workgroup.
-const WORKGROUP: u32 = 64;
+pub(crate) const WORKGROUP: u32 = 64;
+/// Hash table side: 2^22 buckets, 16 MB of u32.
+pub(crate) const TABLE_BITS: u32 = 22;
+/// Bucket count of the hash table.
+pub(crate) const TABLE_SIZE: u32 = 1 << TABLE_BITS;
+/// Mask that folds any bucket into the table.
+pub(crate) const TABLE_MASK: u32 = TABLE_SIZE - 1;
+/// Entries per scan slice. The scan runs over fixed sizes, so the
+/// dispatch counts stay constant.
+pub(crate) const SCAN_SLICE: u32 = 256;
+/// Slice count of the table scan.
+pub(crate) const SCAN_SLICES: u32 = TABLE_SIZE / SCAN_SLICE;
 
 /// Solver and motion constants for the kernels. Exactly 64 bytes: sixteen
 /// flat floats, so the Rust and WGSL offsets agree by construction.
@@ -61,13 +186,20 @@ pub(crate) struct SimUniforms {
 const _: () = assert!(size_of::<SimUniforms>() == 64);
 
 impl SimUniforms {
-    /// Packs the settings one step needs. The pair-pass fields stay zero
-    /// until that phase lands on the GPU.
-    pub(crate) fn new(settings: &SimSettings, dt: f32, n: usize) -> Self {
+    /// Packs the settings one step needs. `cell_size` feeds the grid
+    /// kernels, `table_mask` folds buckets into the table. The pair-pass
+    /// fields stay zero until that phase lands on the GPU.
+    pub(crate) fn new(
+        settings: &SimSettings,
+        dt: f32,
+        cell_size: f32,
+        table_mask: u32,
+        n: usize,
+    ) -> Self {
         SimUniforms {
             dt,
             gravity: settings.gravity,
-            cell_size: 0.0,
+            cell_size,
             floor_restitution: settings.floor_restitution,
             ground_friction: settings.ground_friction,
             pair_restitution: settings.pair_restitution,
@@ -79,7 +211,7 @@ impl SimUniforms {
             pad: 0.0,
             n: n as u32,
             rounds: settings.resolve_rounds as u32,
-            table_mask: 0,
+            table_mask,
             pair_cap: 0,
         }
     }
@@ -95,7 +227,23 @@ pub(crate) struct GpuState {
     bodies_buf: wgpu::Buffer,
     /// Body slots the storage buffer holds.
     bodies_capacity: u32,
+    /// Layout for the two integrate and floor bindings.
+    bgl: wgpu::BindGroupLayout,
     bind_group: wgpu::BindGroup,
+    /// Hash buckets: counts, then exclusive starts after the scan.
+    pub(super) table_buf: wgpu::Buffer,
+    /// Per-bucket fill cursor for one scatter.
+    pub(super) cursor_buf: wgpu::Buffer,
+    /// Body indices grouped by bucket.
+    pub(super) body_ids_buf: wgpu::Buffer,
+    /// Body id slots the buffer holds.
+    pub(super) body_ids_capacity: u32,
+    /// Layout for the five grid bindings. Kept for buffer recreation.
+    pub(super) bgl_grid: wgpu::BindGroupLayout,
+    pub(super) bind_grid: wgpu::BindGroup,
+    pub(super) bind_scan: wgpu::BindGroup,
+    /// Pipelines from [`super::grid::GridKernels`].
+    pub(super) kernels: super::grid::GridKernels,
 }
 
 impl GpuState {
@@ -167,35 +315,85 @@ impl GpuState {
                 | wgpu::BufferUsages::STORAGE,
             mapped_at_creation: false,
         });
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("physics bind group"),
-            layout: &bgl,
+        let bind_group = pair_bind(device, &bgl, &bodies_buf, &sim_buf);
+
+        // Grid scratch. The table starts as counts and holds exclusive
+        // starts after the scan. Both clears run per frame via the encoder.
+        let table_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("grid table"),
+            size: TABLE_SIZE as u64 * U32_SIZE,
+            usage: wgpu::BufferUsages::COPY_DST
+                | wgpu::BufferUsages::COPY_SRC
+                | wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
+        let cursor_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("grid cursor"),
+            size: TABLE_SIZE as u64 * U32_SIZE,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
+        let aux_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("grid scan sums"),
+            size: SCAN_SLICES as u64 * U32_SIZE,
+            usage: wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
+        let body_ids_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("grid body ids"),
+            size: U32_SIZE,
+            usage: wgpu::BufferUsages::COPY_DST
+                | wgpu::BufferUsages::COPY_SRC
+                | wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
+
+        let bgl_grid = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("grid layout"),
             entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                        buffer: &bodies_buf,
-                        offset: 0,
-                        size: None,
-                    }),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                        buffer: &sim_buf,
-                        offset: 0,
-                        size: None,
-                    }),
-                },
+                grid_entry(0, false, GPU_BODY_SIZE),
+                grid_entry(1, true, size_of::<SimUniforms>() as u64),
+                grid_entry(2, false, U32_SIZE),
+                grid_entry(3, false, U32_SIZE),
+                grid_entry(4, false, U32_SIZE),
             ],
         });
+        let bgl_scan = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("scan layout"),
+            entries: &[
+                grid_entry(0, false, U32_SIZE),
+                grid_entry(1, false, U32_SIZE),
+            ],
+        });
+        let kernels = super::grid::GridKernels::new(device, &bgl_grid, &bgl_scan);
+
+        let bind_grid = grid_bind(
+            device,
+            &bgl_grid,
+            &bodies_buf,
+            &sim_buf,
+            &table_buf,
+            &cursor_buf,
+            &body_ids_buf,
+        );
+        let bind_scan = scan_bind(device, &bgl_scan, &table_buf, &aux_buf);
+
         GpuState {
             pipeline_integrate,
             pipeline_floor,
             sim_buf,
             bodies_buf,
             bodies_capacity: 1,
+            bgl,
             bind_group,
+            table_buf,
+            cursor_buf,
+            body_ids_buf,
+            body_ids_capacity: 1,
+            bgl_grid,
+            bind_grid,
+            bind_scan,
+            kernels,
         }
     }
 
@@ -221,38 +419,33 @@ impl GpuState {
                 mapped_at_creation: false,
             });
             self.bodies_capacity = bodies.len() as u32;
-            // The old bind group points at the dropped buffer. Rebuild it.
-            self.bind_group = self.make_bind_group(device);
+            // The id list matches the body count one to one.
+            if bodies.len() as u64 > self.body_ids_capacity as u64 {
+                self.body_ids_buf = device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("grid body ids"),
+                    size: bodies.len() as u64 * U32_SIZE,
+                    usage: wgpu::BufferUsages::COPY_DST
+                        | wgpu::BufferUsages::COPY_SRC
+                        | wgpu::BufferUsages::STORAGE,
+                    mapped_at_creation: false,
+                });
+                self.body_ids_capacity = bodies.len() as u32;
+            }
+            // The old bind groups point at the dropped buffers. Rebuild.
+            self.bind_group = pair_bind(device, &self.bgl, &self.bodies_buf, &self.sim_buf);
+            self.bind_grid = grid_bind(
+                device,
+                &self.bgl_grid,
+                &self.bodies_buf,
+                &self.sim_buf,
+                &self.table_buf,
+                &self.cursor_buf,
+                &self.body_ids_buf,
+            );
         }
         if !bodies.is_empty() {
             queue.write_buffer(&self.bodies_buf, 0, bytemuck::cast_slice(bodies));
         }
-    }
-
-    /// Rebuilds the bind group against the current buffers.
-    fn make_bind_group(&self, device: &wgpu::Device) -> wgpu::BindGroup {
-        device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("physics bind group"),
-            layout: &self.pipeline_integrate.get_bind_group_layout(0),
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                        buffer: &self.bodies_buf,
-                        offset: 0,
-                        size: None,
-                    }),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                        buffer: &self.sim_buf,
-                        offset: 0,
-                        size: None,
-                    }),
-                },
-            ],
-        })
     }
 
     /// Records the integrate pass and the floor pass. Two passes, so the
@@ -326,30 +519,7 @@ impl GpuState {
 mod tests {
     use super::*;
     use crate::engine::{BODY_RADIUS, Shape, World};
-
-    /// Builds one offscreen device. Returns `None` without an adapter.
-    fn headless_device() -> Option<(wgpu::Device, wgpu::Queue)> {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::all(),
-            ..wgpu::InstanceDescriptor::new_without_display_handle()
-        });
-        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
-            ..Default::default()
-        }))
-        .ok()?;
-        Some(
-            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-                label: None,
-                required_features: wgpu::Features::default(),
-                required_limits: wgpu::Limits::default(),
-                experimental_features: wgpu::ExperimentalFeatures::disabled(),
-                memory_hints: wgpu::MemoryHints::default(),
-                trace: wgpu::Trace::Off,
-            }))
-            .expect("device request fails"),
-        )
-    }
+    use crate::ui::gpu::headless_device;
 
     /// One lattice drifting sideways in weightlessness. Spacing stays at
     /// 1.0 forever, so the CPU step reduces to integrate — exactly what
@@ -378,11 +548,11 @@ mod tests {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         state: &GpuState,
-        settings: &SimSettings,
+        sim: &SimUniforms,
         n: usize,
         frames: usize,
     ) {
-        state.write_sim(queue, &SimUniforms::new(settings, 1.0 / 60.0, n));
+        state.write_sim(queue, sim);
         let mut encoder =
             device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
         for _ in 0..frames {
@@ -418,7 +588,7 @@ mod tests {
         cpu.settings.max_speed = max_speed;
         let gpu_bodies: Vec<GpuBody> = cpu.bodies.iter().map(GpuBody::from_body).collect();
         let n = gpu_bodies.len();
-        let settings = cpu.settings;
+        let sim = SimUniforms::new(&cpu.settings, 1.0 / 60.0, cpu.cell_size(), TABLE_MASK, n);
 
         let mut state = GpuState::new(&device);
         state.upload_bodies(&device, &queue, &gpu_bodies);
@@ -427,7 +597,7 @@ mod tests {
             for _ in 0..frames {
                 cpu.step(1.0 / 60.0);
             }
-            run_gpu(&device, &queue, &state, &settings, n, frames);
+            run_gpu(&device, &queue, &state, &sim, n, frames);
             let back = state.download_bodies(&device, &queue, n);
             let diff = max_pos_diff(&back, &gpu_bodies_of(&cpu));
             println!("{label} cap {max_speed}: +{frames} frames, max gap {diff:.3e}");
@@ -469,14 +639,14 @@ mod tests {
         let cpu = free_flight_world(8);
         let mirror = gpu_bodies_of(&cpu);
         let n = mirror.len();
-        let settings = cpu.settings;
+        let sim = SimUniforms::new(&cpu.settings, 1.0 / 60.0, cpu.cell_size(), TABLE_MASK, n);
 
         let mut first = GpuState::new(&device);
         let mut second = GpuState::new(&device);
         first.upload_bodies(&device, &queue, &mirror);
         second.upload_bodies(&device, &queue, &mirror);
-        run_gpu(&device, &queue, &first, &settings, n, 120);
-        run_gpu(&device, &queue, &second, &settings, n, 120);
+        run_gpu(&device, &queue, &first, &sim, n, 120);
+        run_gpu(&device, &queue, &second, &sim, n, 120);
         let a = first.download_bodies(&device, &queue, n);
         let b = second.download_bodies(&device, &queue, n);
         assert_eq!(a, b, "two GPU runs diverged");

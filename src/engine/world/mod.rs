@@ -99,6 +99,13 @@ impl World {
         self.contacts.len()
     }
 
+    /// Edge of one broad-phase cell, in world units. Grows with the
+    /// widest spawn. The GPU grid reads it for its cell packing.
+    #[must_use]
+    pub fn cell_size(&self) -> f32 {
+        self.cell_size
+    }
+
     /// Removes every body, resets the grid, and frees the scratch buffers.
     /// A big spawn transient leaves gigabytes of retained capacity behind;
     /// `clear` is the explicit boundary where that memory must go back.
