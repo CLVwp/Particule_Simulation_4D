@@ -133,6 +133,10 @@ pub(crate) fn physics_window(ctx: &Context, app: &mut App, below: f32) {
                     rate_drag(ui, &mut app.fluid.diffusion);
                     ui.end_row();
                     grid_slider(ui, "Emit", &mut app.fluid.emit, 0.0..=10.0, 0.5);
+                    if ui.button("Reset fluid").clicked() {
+                        app.fluid.clear();
+                    }
+                    ui.end_row();
                 }
             }
         });

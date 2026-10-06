@@ -19,11 +19,22 @@ pub(crate) fn overlay(ctx: &Context, app: &mut App, scene: &SceneOut) {
     if !app.debug {
         return;
     }
-    // The scene works in points. egui paints in points. Show device pixels.
+    // The scene works in physical pixels. egui paints in points.
+    // Show device pixels.
     let view = ctx.viewport_rect();
     let scale = ctx.pixels_per_point();
     let (w, h) = (view.width() * scale, view.height() * scale);
-    let p = app.world.phase_ms;
+    // One law set fills the phase table. The rows switch with the mode.
+    let (names, p): (&[&str], &[f32]) = match app.mode {
+        PhysicsMode::Newton => (
+            &["integrate", "grid", "contacts", "resolve", "floor"],
+            &app.world.phase_ms,
+        ),
+        PhysicsMode::Fluid => (
+            &["emit", "buoyancy", "velocity", "density"],
+            &app.fluid.phase_ms,
+        ),
+    };
     let step_total: f32 = p.iter().sum();
     let par_min = app.world.settings.par_min;
     let gpu_render = app.mode == PhysicsMode::Newton && app.tuning.gpu_render;
@@ -54,17 +65,28 @@ pub(crate) fn overlay(ctx: &Context, app: &mut App, scene: &SceneOut) {
                                 app.step_ms
                             ),
                         );
-                        line(
-                            ui,
-                            format!(
-                                "bodies {}   contacts {}   threads {}",
-                                app.world.bodies.len(),
-                                app.world.contact_count(),
-                                thread_count()
+                        match app.mode {
+                            PhysicsMode::Newton => line(
+                                ui,
+                                format!(
+                                    "bodies {}   contacts {}   threads {}",
+                                    app.world.bodies.len(),
+                                    app.world.contact_count(),
+                                    thread_count()
+                                ),
                             ),
-                        );
+                            PhysicsMode::Fluid => line(
+                                ui,
+                                format!(
+                                    "fluid {} x {}   emit {:.1}   threads {}",
+                                    app.fluid.n,
+                                    app.fluid.n,
+                                    app.fluid.emit,
+                                    thread_count()
+                                ),
+                            ),
+                        }
                         line(ui, format!("path: {path}   PAR_MIN {par_min}"));
-                        let names = ["integrate", "grid", "contacts", "resolve", "floor"];
                         for (name, ms) in names.iter().zip(p.iter()) {
                             let share = if step_total > 0.0 {
                                 100.0 * ms / step_total
