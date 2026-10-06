@@ -7,11 +7,11 @@ use egui::{
     RichText, Slider, Ui, UiBuilder, Vec2, Window, pos2,
 };
 
-use particule_simulation_4d::engine::{Body, PAR_MIN, Shape, thread_count};
+use particule_simulation_4d::engine::{Body, Shape, thread_count};
 use particule_simulation_4d::perf::{allocated_bytes, peak_bytes};
 
 use crate::ui::input::{KeyLayout, MoveAction};
-use crate::ui::scene::SceneOut;
+use crate::ui::scene::{SceneOut, Tuning};
 use crate::ui::theme::{BG, FAINT, FG};
 use crate::ui::{App, Page, PhysicsMode};
 
@@ -344,7 +344,7 @@ fn physics_window(ctx: &Context, app: &mut App, below: f32) {
 }
 
 /// F1 overlay. CPU, GPU, and memory stats in the bottom-left corner.
-fn overlay(ctx: &Context, app: &App, scene: &SceneOut) {
+fn overlay(ctx: &Context, app: &mut App, scene: &SceneOut) {
     if !app.debug {
         return;
     }
@@ -354,9 +354,10 @@ fn overlay(ctx: &Context, app: &App, scene: &SceneOut) {
     let (w, h) = (view.width() * scale, view.height() * scale);
     let p = app.world.phase_ms;
     let step_total: f32 = p.iter().sum();
+    let par_min = app.world.settings.par_min;
     let path = if app.mode == PhysicsMode::Fluid {
         format!("fluid grid {} x {}", app.fluid.n, app.fluid.n)
-    } else if app.world.bodies.len() >= PAR_MIN {
+    } else if app.world.bodies.len() >= par_min {
         "parallel".to_string()
     } else {
         "inline".to_string()
@@ -390,7 +391,7 @@ fn overlay(ctx: &Context, app: &App, scene: &SceneOut) {
                                 thread_count()
                             ),
                         );
-                        line(ui, format!("path: {path}   PAR_MIN {PAR_MIN}"));
+                        line(ui, format!("path: {path}   PAR_MIN {par_min}"));
                         let names = ["integrate", "grid", "contacts", "resolve", "floor"];
                         for (name, ms) in names.iter().zip(p.iter()) {
                             let share = if step_total > 0.0 {
@@ -421,9 +422,72 @@ fn overlay(ctx: &Context, app: &App, scene: &SceneOut) {
                                 (size_of::<Body>() * app.world.bodies.len()) as f32 / 1048576.0
                             ),
                         );
+                        tuning_panel(ui, app);
                     });
                 });
         });
+}
+
+/// One labeled slider row inside the tuning panel.
+fn slider_row(
+    ui: &mut Ui,
+    label: &str,
+    value: &mut f32,
+    range: std::ops::RangeInclusive<f32>,
+    step: f64,
+) {
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(label).color(FAINT));
+        ui.add(Slider::new(value, range).step_by(step));
+    });
+}
+
+/// The live optimization controls. Every knob edits a running system; the
+/// stats above answer the "did it help" question at a glance.
+fn tuning_panel(ui: &mut Ui, app: &mut App) {
+    head(ui, "Tuning");
+    ui.checkbox(&mut app.tuning.lod_merge, "Tile merge (LOD)");
+    ui.add_enabled_ui(app.tuning.lod_merge, |ui| {
+        slider_row(
+            ui,
+            "merge px",
+            &mut app.tuning.merge_radius_px,
+            1.5..=8.0,
+            0.5,
+        );
+        slider_row(
+            ui,
+            "tile px",
+            &mut app.tuning.merge_tile_px,
+            4.0..=32.0,
+            1.0,
+        );
+        slider_row(
+            ui,
+            "tile fill",
+            &mut app.tuning.merge_tile_fill,
+            0.5..=1.0,
+            0.05,
+        );
+    });
+    ui.checkbox(&mut app.tuning.cull_offscreen, "Off-screen cull");
+    slider_row(
+        ui,
+        "fluid cutoff",
+        &mut app.tuning.density_cutoff,
+        0.0..=0.2,
+        0.01,
+    );
+    ui.checkbox(&mut app.world.settings.prune_dead_pairs, "Prune dead pairs");
+    let mut par = app.world.settings.par_min as f32;
+    slider_row(ui, "PAR_MIN", &mut par, 0.0..=16384.0, 256.0);
+    app.world.settings.par_min = par as usize;
+    if ui.button("Reset tuning").clicked() {
+        app.tuning = Tuning::default();
+        let defaults = crate::ui::App::new();
+        app.world.settings.par_min = defaults.world.settings.par_min;
+        app.world.settings.prune_dead_pairs = defaults.world.settings.prune_dead_pairs;
+    }
 }
 
 /// Draws one axis tip label at its screen position.

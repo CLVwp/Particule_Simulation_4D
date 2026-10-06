@@ -4,7 +4,6 @@ use rayon::prelude::*;
 
 use super::World;
 use super::body::Body;
-use super::config::PAR_MIN;
 use super::contacts::{Contact, J_SIDE};
 
 pub(super) const PAIR_RESTITUTION: f32 = 0.6;
@@ -102,6 +101,7 @@ impl World {
             ..
         } = self;
         let rest = settings.pair_restitution;
+        let par_min = settings.par_min;
         for _ in 0..RESOLVE_ROUNDS {
             // Every slot is rewritten below, so only growth needs a write.
             deltas.resize(contacts.len(), ContactDelta::ZERO);
@@ -112,7 +112,7 @@ impl World {
             let delta_of = |(d, c): (&mut ContactDelta, &Contact)| {
                 *d = contact_delta(&bodies[c.i as usize], &bodies[c.j as usize], c, rest);
             };
-            if deltas.len() < PAR_MIN {
+            if deltas.len() < par_min {
                 deltas.iter_mut().zip(contacts.iter()).for_each(delta_of);
             } else {
                 deltas
@@ -138,7 +138,7 @@ impl World {
                     body.vel[k] += dvel[k];
                 }
             };
-            if bodies.len() < PAR_MIN {
+            if bodies.len() < par_min {
                 bodies.iter_mut().enumerate().for_each(apply);
             } else {
                 bodies.par_iter_mut().enumerate().for_each(apply);

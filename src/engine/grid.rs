@@ -3,7 +3,6 @@
 use rayon::prelude::*;
 
 use super::World;
-use super::config::PAR_MIN;
 
 fn cell_of(p: [f32; 3], cell_size: f32) -> [i32; 3] {
     [
@@ -76,10 +75,12 @@ impl World {
             cell_start,
             bodies,
             cell_size,
+            settings,
             ..
         } = self;
         let cs = *cell_size;
         let bodies = &*bodies;
+        let par_min = settings.par_min;
         // Guards the `as u32` body-index casts below.
         debug_assert!(bodies.len() <= u32::MAX as usize);
         cell_sort.clear();
@@ -87,7 +88,7 @@ impl World {
         let fill = |(i, slot): (usize, &mut (u64, u32))| {
             *slot = (cell_key(bodies[i].pos, cs), i as u32);
         };
-        if cell_sort.len() < PAR_MIN {
+        if cell_sort.len() < par_min {
             cell_sort.iter_mut().enumerate().for_each(fill);
             cell_sort.sort_unstable();
         } else {

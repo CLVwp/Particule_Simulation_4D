@@ -5,7 +5,7 @@ use std::time::Instant;
 use rayon::prelude::*;
 
 use super::body::{Body, Shape};
-use super::config::{BODY_RADIUS, FLOOR_Y, MIN_RADIUS, PAR_MIN, SimSettings};
+use super::config::{BODY_RADIUS, FLOOR_Y, MIN_RADIUS, SimSettings};
 use super::contacts::Contact;
 use super::resolve::ContactDelta;
 use super::rng::Rng;
@@ -167,7 +167,8 @@ impl World {
     /// Explicit Euler integration, split across the pool.
     fn integrate(&mut self, dt: f32) {
         let g = self.settings.gravity;
-        par_each(&mut self.bodies, |b| {
+        let par_min = self.settings.par_min;
+        par_each(&mut self.bodies, par_min, |b| {
             b.vel[1] += g * dt;
             b.pos[0] += b.vel[0] * dt;
             b.pos[1] += b.vel[1] * dt;
@@ -179,7 +180,8 @@ impl World {
     fn collide_floor(&mut self) {
         let rest = self.settings.floor_restitution;
         let friction = self.settings.ground_friction;
-        par_each(&mut self.bodies, |b| {
+        let par_min = self.settings.par_min;
+        par_each(&mut self.bodies, par_min, |b| {
             if b.pos[1] - b.radius < FLOOR_Y && b.vel[1] < 0.0 {
                 b.pos[1] = FLOOR_Y + b.radius;
                 b.vel[1] = -b.vel[1] * rest;
@@ -195,9 +197,9 @@ fn ms_since(t: Instant) -> f32 {
     t.elapsed().as_secs_f32() * 1000.0
 }
 
-/// Runs `f` on every element, on the pool above `PAR_MIN`, inline below.
-fn par_each<T: Send>(slice: &mut [T], f: impl Fn(&mut T) + Sync + Send) {
-    if slice.len() < PAR_MIN {
+/// Runs `f` on every element, on the pool above `par_min`, inline below.
+fn par_each<T: Send>(slice: &mut [T], par_min: usize, f: impl Fn(&mut T) + Sync + Send) {
+    if slice.len() < par_min {
         slice.iter_mut().for_each(f);
     } else {
         slice.par_iter_mut().for_each(f);

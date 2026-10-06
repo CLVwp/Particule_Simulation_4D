@@ -15,7 +15,7 @@ use particule_simulation_4d::engine::{BODY_RADIUS, MIN_RADIUS, Shape, World};
 
 use crate::ui::camera::Camera;
 use crate::ui::input::{InputState, apply_moves};
-use crate::ui::scene::TileCache;
+use crate::ui::scene::{TileCache, Tuning};
 use crate::ui::theme::{SMOOTH_KEEP, SMOOTH_NEW};
 
 /// Fixed physics step. One step runs per rendered frame.
@@ -81,6 +81,8 @@ pub(crate) struct App {
     pub(crate) scene_ms: f32,
     /// Reused tile merge bins.
     pub(crate) tiles: TileCache,
+    /// Live render tuning. The F1 panel edits these.
+    pub(crate) tuning: Tuning,
     /// GPU adapter name. Set after wgpu init.
     pub(crate) adapter_info: String,
     /// Time of the previous frame. Drives the move scale.
@@ -110,6 +112,7 @@ impl App {
             step_ms: 0.0,
             scene_ms: 0.0,
             tiles: TileCache::default(),
+            tuning: Tuning::default(),
             adapter_info: "unknown".to_string(),
             last_frame: None,
         }

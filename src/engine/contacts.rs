@@ -3,7 +3,6 @@
 use rayon::prelude::*;
 
 use super::World;
-use super::config::PAR_MIN;
 use super::grid::{STENCIL, key_cell, pack_cell};
 
 /// A pair of bodies that may overlap. Masses are stored once; they never change.
@@ -44,12 +43,15 @@ impl World {
             bc_start,
             bc_cursor,
             bc_items,
+            settings,
             ..
         } = self;
         let cell_sort = &*cell_sort;
         let cell_keys = &*cell_keys;
         let cell_start = &*cell_start;
         let bodies = &*bodies;
+        let par_min = settings.par_min;
+        let prune = settings.prune_dead_pairs;
         // Guards the `as u32` cell-count cast in the scan below.
         debug_assert!(bodies.len() <= u32::MAX as usize);
         let n_cells = cell_keys.len();
@@ -78,16 +80,18 @@ impl World {
                                     return None;
                                 }
                                 let (pi, pj) = (&bodies[bi as usize], &bodies[bj as usize]);
-                                let d = [
-                                    pj.pos[0] - pi.pos[0],
-                                    pj.pos[1] - pi.pos[1],
-                                    pj.pos[2] - pi.pos[2],
-                                ];
-                                let dist2 = d[0] * d[0] + d[1] * d[1] + d[2] * d[2];
-                                let min_d = pi.radius + pj.radius;
-                                // Same test as `contact_delta`, so no live pair is lost.
-                                if dist2 >= min_d * min_d || dist2 < 1e-12 {
-                                    return None;
+                                if prune {
+                                    let d = [
+                                        pj.pos[0] - pi.pos[0],
+                                        pj.pos[1] - pi.pos[1],
+                                        pj.pos[2] - pi.pos[2],
+                                    ];
+                                    let dist2 = d[0] * d[0] + d[1] * d[1] + d[2] * d[2];
+                                    let min_d = pi.radius + pj.radius;
+                                    // Same test as `contact_delta`, so no live pair is lost.
+                                    if dist2 >= min_d * min_d || dist2 < 1e-12 {
+                                        return None;
+                                    }
                                 }
                                 Some(Contact {
                                     i: bi,
@@ -102,7 +106,7 @@ impl World {
         };
         // Extend in place, so the buffer survives from one step to the next.
         contacts.clear();
-        if n_cells < PAR_MIN {
+        if n_cells < par_min {
             contacts.extend((0..n_cells as u32).flat_map(cell_scan));
         } else {
             contacts.par_extend((0..n_cells as u32).into_par_iter().flat_map_iter(cell_scan));

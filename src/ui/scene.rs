@@ -5,7 +5,7 @@ use std::time::Instant;
 
 use bytemuck::{Pod, Zeroable};
 use particule_simulation_4d::engine::fluid::Fluid;
-use particule_simulation_4d::engine::{Body, PAR_MIN, Shape};
+use particule_simulation_4d::engine::{Body, Shape};
 use rayon::prelude::*;
 
 use crate::ui::camera::Camera;
@@ -26,9 +26,6 @@ pub(crate) const MERGE_RADIUS_PX: f32 = 3.0;
 pub(crate) const MERGE_TILE_PX: f32 = 8.0;
 /// The merged quad radius spans this share of the tile. It covers the whole tile.
 pub(crate) const MERGE_TILE_FILL: f32 = 0.75;
-/// Spill tile rows and columns on each screen edge.
-/// A merged dot reaches less than one tile past an edge.
-const MERGE_TILE_SPILL: i32 = 1;
 /// Cap for tile rows and columns on one axis. It keeps tile indexes inside `u32`.
 const MERGE_TILES_MAX: i32 = 1 << 15;
 
@@ -133,8 +130,39 @@ pub(crate) struct TileCache {
 }
 
 /// Tile rows or columns for one screen span. The result is at least one tile.
-fn merge_tile_axis(span: f32) -> i32 {
-    ((span / MERGE_TILE_PX).ceil().max(1.0) as i32).min(MERGE_TILES_MAX)
+fn merge_tile_axis(span: f32, tile_px: f32) -> i32 {
+    ((span / tile_px).ceil().max(1.0) as i32).min(MERGE_TILES_MAX)
+}
+
+/// Live tuning for the render-side optimizations. `Default` matches the
+/// constants above. The F1 panel edits these at runtime.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Tuning {
+    /// Merge small dots into screen tiles.
+    pub(crate) lod_merge: bool,
+    /// Bodies below this screen radius merge into tiles.
+    pub(crate) merge_radius_px: f32,
+    /// Side length of one merge tile, in screen pixels.
+    pub(crate) merge_tile_px: f32,
+    /// The merged quad radius spans this share of the tile.
+    pub(crate) merge_tile_fill: f32,
+    /// Drop quads that lie fully outside the viewport.
+    pub(crate) cull_offscreen: bool,
+    /// Fluid cells at or below this density do not draw.
+    pub(crate) density_cutoff: f32,
+}
+
+impl Default for Tuning {
+    fn default() -> Self {
+        Tuning {
+            lod_merge: true,
+            merge_radius_px: MERGE_RADIUS_PX,
+            merge_tile_px: MERGE_TILE_PX,
+            merge_tile_fill: MERGE_TILE_FILL,
+            cull_offscreen: true,
+            density_cutoff: DENSITY_CUTOFF,
+        }
+    }
 }
 
 /// Appends one screen segment as six vertices. They form two triangles of a
@@ -167,12 +195,15 @@ pub(crate) fn push_segment(
 
 /// Emits one instance per visible Newton body. Small dots merge into tiles.
 /// Sorts far to near, so draw order follows the painter's algorithm.
+#[expect(clippy::too_many_arguments)]
 pub(crate) fn emit_bodies(
     cam: &Camera,
     bodies: &[Body],
     w: f32,
     h: f32,
     dist: f32,
+    tuning: &Tuning,
+    par_min: usize,
     tiles: &mut TileCache,
     out: &mut SceneOut,
 ) {
@@ -189,7 +220,7 @@ pub(crate) fn emit_bodies(
             shape: b.shape,
         }
     };
-    let mut points: Vec<SortBody> = if bodies.len() >= PAR_MIN {
+    let mut points: Vec<SortBody> = if bodies.len() >= par_min {
         bodies
             .par_iter()
             .map(project)
@@ -206,9 +237,12 @@ pub(crate) fn emit_bodies(
     // Direct-indexed bins replace a hash map. No hash, no per-frame alloc.
     let bins = &mut tiles.bins;
     let touched = &mut tiles.touched;
-    let across = merge_tile_axis(w);
-    let down = merge_tile_axis(h);
-    let spill = 2 * MERGE_TILE_SPILL;
+    let across = merge_tile_axis(w, tuning.merge_tile_px);
+    let down = merge_tile_axis(h, tuning.merge_tile_px);
+    // Dots can reach one tile past an edge per merge radius, so the spill
+    // ring follows the tuning values.
+    let edge = ((tuning.merge_radius_px / tuning.merge_tile_px).ceil() as i32).max(1);
+    let spill = 2 * edge;
     // Grid width. One spill column sits on each screen edge.
     let stride = across + spill;
     let tile_total = (stride * (down + spill)) as usize;
@@ -218,21 +252,22 @@ pub(crate) fn emit_bodies(
         bins.resize(tile_total, TileMerge::default());
     }
     points.retain_mut(|p| {
-        if p.x + p.radius_px < 0.0
-            || p.x - p.radius_px > w
-            || p.y + p.radius_px < 0.0
-            || p.y - p.radius_px > h
+        if tuning.cull_offscreen
+            && (p.x + p.radius_px < 0.0
+                || p.x - p.radius_px > w
+                || p.y + p.radius_px < 0.0
+                || p.y - p.radius_px > h)
         {
             return false;
         }
-        if p.radius_px >= MERGE_RADIUS_PX {
+        if !tuning.lod_merge || p.radius_px >= tuning.merge_radius_px {
             return true;
         }
         // Small dots overdraw the same few pixels. Merge them per tile.
         // Spill tiles hold dots past a screen edge.
-        let tx = ((p.x / MERGE_TILE_PX).floor() as i32).clamp(-MERGE_TILE_SPILL, across);
-        let ty = ((p.y / MERGE_TILE_PX).floor() as i32).clamp(-MERGE_TILE_SPILL, down);
-        let idx = ((ty + MERGE_TILE_SPILL) * stride + (tx + MERGE_TILE_SPILL)) as usize;
+        let tx = ((p.x / tuning.merge_tile_px).floor() as i32).clamp(-edge, across);
+        let ty = ((p.y / tuning.merge_tile_px).floor() as i32).clamp(-edge, down);
+        let idx = ((ty + edge) * stride + (tx + edge)) as usize;
         debug_assert!(idx < tile_total);
         let t = &mut bins[idx];
         if t.count == 0 {
@@ -246,7 +281,7 @@ pub(crate) fn emit_bodies(
         false
     });
     // Far bodies draw first.
-    if points.len() >= PAR_MIN {
+    if points.len() >= par_min {
         points.par_sort_unstable_by(|a, b| b.depth.total_cmp(&a.depth));
     } else {
         points.sort_unstable_by(|a, b| b.depth.total_cmp(&a.depth));
@@ -260,7 +295,7 @@ pub(crate) fn emit_bodies(
         merged.push(SortBody {
             x: t.x / n,
             y: t.y / n,
-            radius_px: MERGE_TILE_PX * MERGE_TILE_FILL,
+            radius_px: tuning.merge_tile_px * tuning.merge_tile_fill,
             depth: t.depth / n,
             // The majority shape picks the tile color.
             shape: if t.spheres * 2 >= t.count {
@@ -294,7 +329,14 @@ pub(crate) fn emit_bodies(
 
 /// Emits one instance per lit fluid cell. Cells never merge into tiles.
 /// Sorts far to near, so draw order follows the painter's algorithm.
-pub(crate) fn emit_fluid(cam: &Camera, fluid: &Fluid, w: f32, h: f32, out: &mut SceneOut) {
+pub(crate) fn emit_fluid(
+    cam: &Camera,
+    fluid: &Fluid,
+    w: f32,
+    h: f32,
+    cutoff: f32,
+    out: &mut SceneOut,
+) {
     let n = fluid.n;
     let cell = FLUID_SPAN / n as f32;
     // The loop visits `n * n` cells, so each push fills one sorted quad.
@@ -302,7 +344,7 @@ pub(crate) fn emit_fluid(cam: &Camera, fluid: &Fluid, w: f32, h: f32, out: &mut 
     for j in 1..=n {
         for i in 1..=n {
             let density = fluid.dens[i + (n + 2) * j];
-            if density <= DENSITY_CUTOFF {
+            if density <= cutoff {
                 continue;
             }
             let xw = FLUID_LEFT + (i as f32 - 0.5) * cell;
@@ -381,6 +423,7 @@ impl App {
         out.lines.clear();
         out.axis_labels.clear();
         let dist = self.cam.dist;
+        let par_min = self.world.settings.par_min;
         // One law set fills the instance stream. Grid and axes always draw.
         match self.mode {
             PhysicsMode::Newton => {
@@ -390,11 +433,20 @@ impl App {
                     w,
                     h,
                     dist,
+                    &self.tuning,
+                    par_min,
                     &mut self.tiles,
                     out,
                 );
             }
-            PhysicsMode::Fluid => emit_fluid(&self.cam, &self.fluid, w, h, out),
+            PhysicsMode::Fluid => emit_fluid(
+                &self.cam,
+                &self.fluid,
+                w,
+                h,
+                self.tuning.density_cutoff,
+                out,
+            ),
         }
         emit_lines(&self.cam, w, h, out);
         out.instance_count = out.instances.len();
@@ -433,7 +485,17 @@ mod tests {
         };
         let mut tiles = TileCache::default();
         let mut out = SceneOut::default();
-        emit_bodies(&cam, &[body], W, H, cam.dist, &mut tiles, &mut out);
+        emit_bodies(
+            &cam,
+            &[body],
+            W,
+            H,
+            cam.dist,
+            &Tuning::default(),
+            usize::MAX,
+            &mut tiles,
+            &mut out,
+        );
         assert_eq!(out.instances.len(), 1);
         let q = out.instances[0];
         assert_eq!((q.x, q.y), (W / 2.0, H / 2.0));
@@ -457,7 +519,17 @@ mod tests {
         };
         let mut tiles = TileCache::default();
         let mut out = SceneOut::default();
-        emit_bodies(&cam, &[body], W, H, cam.dist, &mut tiles, &mut out);
+        emit_bodies(
+            &cam,
+            &[body],
+            W,
+            H,
+            cam.dist,
+            &Tuning::default(),
+            usize::MAX,
+            &mut tiles,
+            &mut out,
+        );
         assert!(out.instances.is_empty());
     }
 }
