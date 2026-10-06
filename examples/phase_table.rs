@@ -1,7 +1,7 @@
 //! Prints the per-phase step cost at a body count, like the F1 table.
 //! Run: `cargo run --release --example phase_table [count]`
 
-use particule_simulation_4d::engine::World;
+use particule_simulation_4d::engine::{World, thread_count};
 
 fn main() {
     let n: usize = std::env::args()
@@ -11,8 +11,9 @@ fn main() {
     let dt = 1.0 / 60.0;
     let mut w = World::new();
     w.spawn_wave(n, [0.0, 8.0, 0.0], 4.0);
-    // Settle the pile. The measurement starts on a resting scene.
-    for _ in 0..30 {
+    // Settle the pile. Sixty frames, same depth as the bench `settled`
+    // helper, so the example and the bench start from the same rest state.
+    for _ in 0..60 {
         w.step(dt);
     }
     let frames = 60;
@@ -25,7 +26,11 @@ fn main() {
     }
     let f = frames as f32;
     let names = ["integrate", "grid", "contacts", "resolve", "floor"];
-    println!("bodies {n}, contacts {}, thread pool", w.contact_count());
+    println!(
+        "bodies {n}, contacts {}, {} threads",
+        w.contact_count(),
+        thread_count()
+    );
     for (name, s) in names.iter().zip(sums) {
         println!("{name:>10}: {:7.2} ms", s / f);
     }
