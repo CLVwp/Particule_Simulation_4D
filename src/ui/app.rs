@@ -144,7 +144,6 @@ impl WindowState {
         self.config.width = size.width;
         self.config.height = size.height;
         self.surface.configure(&self.device, &self.config);
-        self.renderer.resize(&self.device, size.width, size.height);
     }
 
     /// Reconfigures the surface after a lost or outdated frame.

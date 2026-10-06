@@ -7,7 +7,7 @@ use egui::{
     RichText, Slider, Ui, UiBuilder, Vec2, Window, pos2,
 };
 
-use particule_simulation_4d::engine::{Body, Shape, thread_count};
+use particule_simulation_4d::engine::{Body, Shape, SimSettings, thread_count};
 use particule_simulation_4d::perf::{allocated_bytes, peak_bytes};
 
 use crate::ui::input::{KeyLayout, MoveAction};
@@ -15,12 +15,6 @@ use crate::ui::scene::{SceneOut, Tuning};
 use crate::ui::theme::{BG, FAINT, FG};
 use crate::ui::{App, Page, PhysicsMode};
 
-/// Panel and window fill. Matches the render clear color.
-const PANEL: Color32 = Color32::from_rgb(
-    ((BG >> 16) & 0xff) as u8,
-    ((BG >> 8) & 0xff) as u8,
-    (BG & 0xff) as u8,
-);
 /// Card fill for the settings page and the side panels.
 const CARD: Color32 = Color32::from_rgb(0x15, 0x1b, 0x23);
 /// Fill of the debug overlay.
@@ -46,8 +40,8 @@ pub(crate) fn show(ctx: &Context, app: &mut App, scene: &SceneOut) {
 fn apply_theme(ctx: &Context) {
     ctx.all_styles_mut(|style| {
         style.visuals = egui::Visuals::dark();
-        style.visuals.panel_fill = PANEL;
-        style.visuals.window_fill = PANEL;
+        style.visuals.panel_fill = BG;
+        style.visuals.window_fill = BG;
     });
 }
 
@@ -403,7 +397,7 @@ fn overlay(ctx: &Context, app: &mut App, scene: &SceneOut) {
                         }
                         head(ui, "GPU");
                         line(ui, format!("viewport {w:.0} x {h:.0} px"));
-                        line(ui, format!("instances painted {}", scene.instance_count));
+                        line(ui, format!("instances painted {}", scene.instances.len()));
                         line(ui, format!("scene (project + sort) {:.3} ms", app.scene_ms));
                         line(ui, format!("adapter: {}", app.adapter_info));
                         head(ui, "Memory");
@@ -494,11 +488,11 @@ fn tuning_panel(ui: &mut Ui, app: &mut App) {
     );
     if ui.button("Reset tuning").clicked() {
         app.tuning = Tuning::default();
-        let defaults = crate::ui::App::new();
-        app.world.settings.par_min = defaults.world.settings.par_min;
-        app.world.settings.prune_dead_pairs = defaults.world.settings.prune_dead_pairs;
-        app.world.settings.resolve_rounds = defaults.world.settings.resolve_rounds;
-        app.world.settings.resolve_epsilon = defaults.world.settings.resolve_epsilon;
+        let defaults = SimSettings::default();
+        app.world.settings.par_min = defaults.par_min;
+        app.world.settings.prune_dead_pairs = defaults.prune_dead_pairs;
+        app.world.settings.resolve_rounds = defaults.resolve_rounds;
+        app.world.settings.resolve_epsilon = defaults.resolve_epsilon;
     }
 }
 
@@ -548,7 +542,7 @@ fn head(ui: &mut Ui, text: &str) {
 
 /// Formats a diffusion-style rate. Zero prints plain, other values print
 /// scientific.
-pub(crate) fn fmt_rate(x: f32) -> String {
+fn fmt_rate(x: f32) -> String {
     if x <= 0.0 {
         "0".to_string()
     } else {

@@ -27,9 +27,9 @@ pub struct Fluid {
     /// Density added per step at the emitter, at the bottom center.
     pub emit: f32,
     /// Horizontal velocity, walls included.
-    pub u: Vec<f32>,
+    u: Vec<f32>,
     /// Vertical velocity, walls included.
-    pub v: Vec<f32>,
+    v: Vec<f32>,
     /// Density, walls included. Read this to draw the fluid.
     pub dens: Vec<f32>,
     /// Scratch arrays: advected velocity and density, pressure and divergence.

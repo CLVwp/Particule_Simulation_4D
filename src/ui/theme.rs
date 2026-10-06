@@ -2,8 +2,8 @@
 
 use egui::Color32;
 
-/// Window background color.
-pub(crate) const BG: u32 = 0x0b0e14;
+/// Window background color. Single source for the panel fill and the render clear.
+pub(crate) const BG: Color32 = Color32::from_rgb(0x0b, 0x0e, 0x14);
 /// Main text color. From `hsla(0.58, 0.15, 0.9, 1.0)`. egui stores premultiplied.
 pub(crate) const FG: Color32 = Color32::from_rgba_premultiplied(226, 230, 233, 255);
 /// Secondary text color. From `hsla(0.58, 0.15, 0.85, 0.9)`. Premultiplied.

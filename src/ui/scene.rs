@@ -15,11 +15,11 @@ use crate::ui::{App, PhysicsMode};
 /// Cells at or below this density do not draw.
 pub(crate) const DENSITY_CUTOFF: f32 = 0.02;
 /// The fluid plane spans `FLUID_SPAN` world units and starts at `FLUID_LEFT`.
-pub(crate) const FLUID_LEFT: f32 = -8.0;
+const FLUID_LEFT: f32 = -8.0;
 /// Width of the fluid plane in world units.
 pub(crate) const FLUID_SPAN: f32 = 16.0;
 /// Depths at or below this sit at or behind the camera.
-pub(crate) const NEAR: f32 = 0.5;
+const NEAR: f32 = 0.5;
 /// Bodies below this screen radius merge into tiles. Bigger bodies paint alone.
 pub(crate) const MERGE_RADIUS_PX: f32 = 3.0;
 /// Side length of one merge tile, in screen pixels.
@@ -80,8 +80,6 @@ pub(crate) struct SceneOut {
     pub(crate) instances: Vec<Instance>,
     /// Six vertices per drawn grid or axis segment.
     pub(crate) lines: Vec<LineVert>,
-    /// Number of valid instances. Set to `instances.len()` at each build.
-    pub(crate) instance_count: usize,
     /// One entry per visible axis tip: screen x, y, color, text.
     pub(crate) axis_labels: Vec<(f32, f32, [f32; 4], &'static str)>,
 }
@@ -449,7 +447,6 @@ impl App {
             ),
         }
         emit_lines(&self.cam, w, h, out);
-        out.instance_count = out.instances.len();
         let ms = (scene.elapsed().as_secs_f32() * 1000.0).min(1000.0);
         self.scene_ms = self.scene_ms * SMOOTH_KEEP + ms * SMOOTH_NEW;
     }

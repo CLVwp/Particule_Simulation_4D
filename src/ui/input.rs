@@ -91,10 +91,11 @@ impl KeyLayout {
         }
     }
 
-    /// One key per `MoveAction`, in `MoveAction::all()` order.
+    /// One key per `MoveAction`, in `MoveAction::all()` order. QWERTY is
+    /// the default binding row.
     fn keys(self) -> [&'static str; 6] {
         match self {
-            KeyLayout::Qwerty => ["w", "s", "a", "d", "e", "q"],
+            KeyLayout::Qwerty => MoveAction::all().map(MoveAction::default_key),
             KeyLayout::Azerty => ["z", "s", "q", "d", "e", "a"],
         }
     }

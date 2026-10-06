@@ -6,14 +6,7 @@ use std::num::NonZeroU64;
 use bytemuck::{Pod, Zeroable};
 
 use crate::ui::scene::{Instance, LineVert};
-
-/// Clear color of the scene pass. Dark blue-black, opaque.
-const CLEAR_COLOR: wgpu::Color = wgpu::Color {
-    r: 0x0b as f64 / 255.0,
-    g: 0x0e as f64 / 255.0,
-    b: 0x14 as f64 / 255.0,
-    a: 1.0,
-};
+use crate::ui::theme::BG;
 
 /// Viewport size for the vertex shader. Exactly 16 bytes.
 #[repr(C)]
@@ -53,10 +46,6 @@ pub(crate) struct Renderer {
     line_buf: wgpu::Buffer,
     /// Line vertices the line buffer holds.
     line_capacity: u32,
-    /// Last recorded width, in physical pixels.
-    width: u32,
-    /// Last recorded height, in physical pixels.
-    height: u32,
 }
 
 impl Renderer {
@@ -215,28 +204,6 @@ impl Renderer {
             instance_capacity: 1,
             line_buf,
             line_capacity: 1,
-            width: 0,
-            height: 0,
-        }
-    }
-
-    /// Records the render size. Sizes are physical pixels.
-    /// Keeps no swapchain. Nothing to rebuild.
-    pub(crate) fn resize(&mut self, _device: &wgpu::Device, w: u32, h: u32) {
-        if self.width == w && self.height == h {
-            return;
-        }
-        self.width = w;
-        self.height = h;
-    }
-
-    /// Picks the viewport for the pass. Falls back to the recorded size
-    /// when the frame size is not positive.
-    fn viewport(&self, w: f32, h: f32) -> (f32, f32) {
-        if w > 0.0 && h > 0.0 {
-            (w, h)
-        } else {
-            (self.width as f32, self.height as f32)
         }
     }
 
@@ -278,7 +245,7 @@ impl Renderer {
         w: f32,
         h: f32,
     ) {
-        let (vp_w, vp_h) = self.viewport(w, h);
+        let (vp_w, vp_h) = (w, h);
         let uniforms = Uniforms {
             vp_w,
             vp_h,
@@ -309,6 +276,13 @@ impl Renderer {
             );
         }
 
+        // The clear color comes from the one shared background color.
+        let clear = wgpu::Color {
+            r: BG.r() as f64 / 255.0,
+            g: BG.g() as f64 / 255.0,
+            b: BG.b() as f64 / 255.0,
+            a: 1.0,
+        };
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("particles"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -316,7 +290,7 @@ impl Renderer {
                 depth_slice: None,
                 resolve_target: None,
                 ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(CLEAR_COLOR),
+                    load: wgpu::LoadOp::Clear(clear),
                     store: wgpu::StoreOp::Store,
                 },
             })],
@@ -375,7 +349,6 @@ mod tests {
         .expect("device request fails");
 
         let mut renderer = Renderer::new(&device, wgpu::TextureFormat::Bgra8Unorm);
-        renderer.resize(&device, 256, 256);
 
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("test target"),
