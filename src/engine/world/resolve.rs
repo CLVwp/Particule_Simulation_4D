@@ -103,6 +103,7 @@ impl World {
         let par_min = settings.par_min;
         let rounds = settings.resolve_rounds.max(1);
         let epsilon = settings.resolve_epsilon;
+        let items = super::atomic_u32s(bc_items);
         for _ in 0..rounds {
             // Every slot is rewritten below, so only growth needs a write.
             deltas.resize(contacts.len(), ContactDelta::ZERO);
@@ -138,7 +139,7 @@ impl World {
                 let (mut dpos, mut dvel) = ([0.0f32; 3], [0.0f32; 3]);
                 let from = bc_start[b] as usize;
                 let to = bc_start[b + 1] as usize;
-                for tag in &bc_items[from..to] {
+                for tag in &items[from..to] {
                     let tag = tag.load(std::sync::atomic::Ordering::Relaxed);
                     let idx = (tag & !J_SIDE) as usize;
                     let (dp, dv) = contact_share(&deltas[idx], &contacts[idx], tag & J_SIDE != 0);

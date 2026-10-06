@@ -36,7 +36,7 @@ pub fn thread_count() -> usize {
 /// world.step(1.0 / 60.0);
 /// assert_eq!(world.bodies.len(), 100);
 /// ```
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct World {
     /// Every body in the world. Callers may edit them between steps.
     pub bodies: Vec<Body>,
@@ -58,11 +58,11 @@ pub struct World {
     /// Per-body contact index as flat arrays: offsets into `bc_items`.
     pub(super) bc_start: Vec<u32>,
     /// Fill cursor for `bc_items`, kept across steps to avoid reallocation.
-    /// Atomics so the parallel fill can rank contacts from shared state.
-    pub(super) bc_cursor: Vec<AtomicU32>,
+    /// Plain u32 slots. The fill takes an atomic view for the fetch-add rank.
+    pub(super) bc_cursor: Vec<u32>,
     /// Contact tags in body order. Bit `J_SIDE` marks the `j` side.
-    /// Atomics so the parallel fill can write slots from shared state.
-    pub(super) bc_items: Vec<AtomicU32>,
+    /// Plain u32 slots. The fill takes an atomic view to write from the pool.
+    pub(super) bc_items: Vec<u32>,
     /// Wall time of the last step per phase, in ms:
     /// integrate, grid, contacts, resolve, floor. Read by the debug overlay.
     pub phase_ms: [f32; 5],
@@ -132,6 +132,19 @@ fn par_each<T: Send>(slice: &mut [T], par_min: usize, f: impl Fn(&mut T) + Sync 
     } else {
         slice.par_iter_mut().for_each(f);
     }
+}
+
+/// Atomic view over the plain u32 scratch. The contact fill ranks slots
+/// with fetch-adds from the pool; the apply loop reads them back.
+///
+/// The caller borrows the slice before the view and drops the view before
+/// any plain write, so the two never overlap.
+pub(super) fn atomic_u32s(v: &mut [u32]) -> &[AtomicU32] {
+    const _: () = assert!(size_of::<AtomicU32>() == size_of::<u32>());
+    // SAFETY: u32 and AtomicU32 share size, alignment, and bit validity, so
+    // the cast preserves every value. The atomic view borrows `v`, so the
+    // memory stays alive and unaliased for the view's whole life.
+    unsafe { &*(std::ptr::from_ref(v) as *const [AtomicU32]) }
 }
 
 #[cfg(test)]

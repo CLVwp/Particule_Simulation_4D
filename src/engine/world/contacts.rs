@@ -1,6 +1,6 @@
 //! Broad phase: candidate contact pairs from the sorted cell grid.
 
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::Ordering;
 
 use rayon::prelude::*;
 
@@ -225,12 +225,15 @@ impl World {
         }
         bc_items.clear();
         // Every slot is written by the fill below; only the length matters.
-        bc_items.resize_with(contacts.len() * 2, || AtomicU32::new(0));
+        bc_items.resize(contacts.len() * 2, 0);
         bc_cursor.clear();
-        bc_cursor.resize_with(n, || AtomicU32::new(0));
+        bc_cursor.resize(n, 0);
         let starts = &*bc_start;
-        let cursors = &*bc_cursor;
-        let items = &*bc_items;
+        // The parallel fill ranks slots with atomic fetch-adds. The atomic
+        // views live only for the step, so the scratch stays plain u32
+        // between steps and the reset stays a memset.
+        let cursors = super::atomic_u32s(bc_cursor);
+        let items = super::atomic_u32s(bc_items);
         let fill = |(ci, c): (usize, &Contact)| {
             let ci = ci as u32;
             let rank = cursors[c.i as usize].fetch_add(1, Ordering::Relaxed);
